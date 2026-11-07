@@ -1,0 +1,141 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: light;
+  }
+
+  html {
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  body {
+    @apply bg-canvas text-ink-800;
+    /* Wallpaper: two soft brand glows and a fine dot texture. Kept very low
+       contrast so white cards stay the focus and body copy keeps its contrast. */
+    background-image: radial-gradient(
+        1100px 680px at 4% -6%,
+        rgba(91, 91, 214, 0.18),
+        transparent 62%
+      ),
+      radial-gradient(
+        760px 520px at 102% 2%,
+        rgba(16, 185, 129, 0.12),
+        transparent 60%
+      ),
+      radial-gradient(
+        980px 640px at 44% 116%,
+        rgba(60, 56, 163, 0.1),
+        transparent 64%
+      ),
+      radial-gradient(rgba(25, 29, 46, 0.06) 1px, transparent 1.5px);
+    background-size: auto, auto, auto, 24px 24px;
+    background-repeat: no-repeat, no-repeat, no-repeat, repeat;
+    background-attachment: fixed, fixed, fixed, scroll;
+  }
+
+  ::selection {
+    @apply bg-brand-200 text-brand-900;
+  }
+
+  *:focus-visible {
+    @apply outline-none ring-2 ring-brand-500/60 ring-offset-2 ring-offset-white;
+  }
+}
+
+@layer components {
+  .card {
+    @apply rounded-xl2 border border-ink-100 bg-white shadow-card;
+  }
+
+  .field-label {
+    @apply mb-1.5 block text-[13px] font-medium text-ink-700;
+  }
+
+  .field-hint {
+    @apply mt-1.5 text-xs leading-relaxed text-ink-400;
+  }
+
+  .field {
+    @apply w-full rounded-lg border border-ink-200 bg-white px-3 py-2.5 text-sm text-ink-900 placeholder:text-ink-300 transition
+      hover:border-ink-300 focus:border-brand-500 focus:outline-none focus:ring-4 focus:ring-brand-500/10;
+  }
+
+  .field-error {
+    @apply border-red-300 focus:border-red-500 focus:ring-red-500/10;
+  }
+
+  .btn {
+    @apply inline-flex select-none items-center justify-center gap-2 rounded-lg px-4 py-2.5 text-sm font-medium
+      transition active:scale-[0.985] disabled:pointer-events-none disabled:opacity-50;
+  }
+
+  .btn-primary {
+    @apply btn bg-ink-900 text-white shadow-sm hover:bg-ink-800;
+  }
+
+  .btn-brand {
+    @apply btn bg-brand-600 text-white shadow-sm hover:bg-brand-700;
+  }
+
+  .btn-secondary {
+    @apply btn border border-ink-200 bg-white text-ink-700 hover:border-ink-300 hover:bg-ink-50;
+  }
+
+  .btn-ghost {
+    @apply btn text-ink-500 hover:bg-ink-50 hover:text-ink-800;
+  }
+
+  .btn-danger {
+    @apply btn bg-red-600 text-white hover:bg-red-700;
+  }
+
+  .btn-sm {
+    @apply px-3 py-1.5 text-[13px];
+  }
+
+  .chip {
+    @apply inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium uppercase tracking-wide;
+  }
+
+  .nav-link {
+    @apply flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium text-ink-500 transition hover:bg-ink-50 hover:text-ink-900;
+  }
+
+  .nav-link-active {
+    @apply bg-brand-50 text-brand-700 hover:bg-brand-50 hover:text-brand-700;
+  }
+
+  .table-head {
+    @apply border-b border-ink-100 px-4 py-3 text-left text-[11px] font-semibold uppercase tracking-wider text-ink-400;
+  }
+
+  .table-cell {
+    @apply border-b border-ink-50 px-4 py-3.5 text-sm text-ink-700;
+  }
+
+  .surface-grid {
+    background-image: linear-gradient(
+        to right,
+        rgba(91, 91, 214, 0.06) 1px,
+        transparent 1px
+      ),
+      linear-gradient(to bottom, rgba(91, 91, 214, 0.06) 1px, transparent 1px);
+    background-size: 44px 44px;
+  }
+}
+
+.scrollbar-slim::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.scrollbar-slim::-webkit-scrollbar-thumb {
+  background-color: rgba(16, 19, 34, 0.15);
+  border-radius: 999px;
+}
+.scrollbar-slim::-webkit-scrollbar-track {
+  background: transparent;
+}

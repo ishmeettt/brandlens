@@ -1,0 +1,13 @@
+# Netlify build settings for BrandLens.
+#
+# Netlify detects Next.js and installs its Next.js runtime automatically, so
+# there is no plugin entry to maintain here. The two NEXT_PUBLIC_SUPABASE_*
+# variables are read at build time and baked into the client bundle — set them
+# in Site configuration → Environment variables, then trigger a deploy.
+
+[build]
+  command = "npm run build"
+  publish = ".next"
+
+[build.environment]
+  NODE_VERSION = "22"
