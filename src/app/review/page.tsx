@@ -17,7 +17,15 @@ import {
   cn,
 } from "../../components/ui";
 import { demoBrandKit, demoSubmissions } from "../../lib/demo";
+import {
+  documentNameFromLabel,
+  locatorForFinding,
+  parseSegments,
+  stripAnchors,
+} from "../../lib/document-extract";
+import { daysUntilExpiry, describeExemption } from "../../lib/exemptions";
 import { formatDate, formatDateTime } from "../../lib/format";
+import { runRuleSet } from "../../lib/rules";
 import {
   getFindingTypeLabel,
   runFullReview,
@@ -25,6 +33,8 @@ import {
   type ReviewResult,
 } from "../../lib/review-pipeline";
 import {
+  currentReviewer,
+  isMissingColumnError,
   isSupabaseConfigured,
   supabase,
   type BrandKit,
@@ -45,7 +55,7 @@ function storedFindingToPipeline(finding: Finding): PipelineFinding {
   return {
     id: finding.id,
     submissionId: finding.submission_id,
-    ruleId: "stored",
+    ruleId: finding.rule_id ?? "stored",
     type: finding.type,
     severity: finding.severity,
     message: finding.message,
@@ -186,24 +196,80 @@ export default function ReviewDashboard() {
 
           if (existing && existing.length > 0) {
             const rows = existing as Finding[];
-            setFindings(rows.map(storedFindingToPipeline));
+            // Stored findings do not carry their anchor, so it is resolved from
+            // the stored text: page anchors survive a reload.
+            const segments = parseSegments(selected.text_content);
+
+            // A stored finding is a snapshot of the review, but an exemption is
+            // a decision that outranks it: granting one must change what the
+            // queue shows immediately. Stored rows carry no rule id before
+            // migration 0004, so the engine — which is deterministic — is asked
+            // which findings the kit's in-date exemptions now excuse.
+            const suppressedNow = runRuleSet(stripAnchors(selected.text_content), kit, {
+              submissionId: selected.id,
+            }).suppressed;
+
+            const quotedTerms = (text: string) =>
+              [...text.matchAll(/[“\"']([^”\"']{2,80})[”\"']/g)].map((match) =>
+                match[1].toLowerCase()
+              );
+
+            // A stored message can predate a wording change in the rule that
+            // raised it, so an exact message match is preferred and the quoted
+            // term is the fallback. Both sides quote the offending wording.
+            const exemptionFor = (row: Finding) => {
+              const exact = suppressedNow.find((entry) => entry.finding.message === row.message);
+              if (exact) return exact.exemption;
+
+              const storedTerms = quotedTerms(row.message);
+              return suppressedNow.find((entry) => {
+                if (entry.finding.type !== row.type) return false;
+                const exemption = entry.exemption;
+                if (exemption.submissionId && exemption.submissionId !== selected.id) return false;
+                const sharesTerm = quotedTerms(entry.finding.message).some((term) =>
+                  storedTerms.includes(term)
+                );
+                return (
+                  sharesTerm ||
+                  (exemption.target
+                    ? row.message.toLowerCase().includes(exemption.target.toLowerCase())
+                    : false)
+                );
+              })?.exemption;
+            };
+
+            const kept: PipelineFinding[] = [];
+            const excused: ReviewResult["suppressed"] = [];
+            for (const row of rows) {
+              const finding: PipelineFinding = {
+                ...storedFindingToPipeline(row),
+                locator: locatorForFinding({ message: row.message }, segments),
+              };
+              const exemption = exemptionFor(row);
+              if (exemption) excused.push({ finding, exemption });
+              else kept.push(finding);
+            }
+
+            setFindings(kept);
             setResult({
               contentText: selected.text_content ?? "",
+              segments,
               deterministicFindings: [],
               aiFindings: [],
               allFindings: [],
               rejectedFindings: [],
+              suppressed: excused,
               summary: {
-                total: rows.length,
-                deterministic: rows.length,
+                total: kept.length,
+                deterministic: kept.length,
                 ai: 0,
                 bySeverity: {
-                  critical: rows.filter((r) => r.severity === "critical").length,
-                  high: rows.filter((r) => r.severity === "high").length,
-                  medium: rows.filter((r) => r.severity === "medium").length,
-                  low: rows.filter((r) => r.severity === "low").length,
+                  critical: kept.filter((r) => r.severity === "critical").length,
+                  high: kept.filter((r) => r.severity === "high").length,
+                  medium: kept.filter((r) => r.severity === "medium").length,
+                  low: kept.filter((r) => r.severity === "low").length,
                 },
-                withCitation: rows.filter((r) => Boolean(r.citation)).length,
+                withCitation: kept.filter((r) => Boolean(r.citation)).length,
                 withoutCitation: 0,
               },
               aiStatus: "ok",
@@ -224,27 +290,46 @@ export default function ReviewDashboard() {
         setRejected(review.rejectedFindings);
 
         if (supabase && kit && review.allFindings.length > 0) {
-          const { data: inserted, error: insertError } = await supabase
+          const rows = review.allFindings.map((finding) => ({
+            submission_id: selected.id,
+            type: finding.type,
+            severity: finding.severity,
+            message: finding.message,
+            citation: finding.citation,
+            source_passage: finding.sourcePassage,
+            intent_summary: finding.intentSummary ?? null,
+            suggestion: finding.suggestion ?? null,
+            status: "pending" as const,
+            rule_id: finding.ruleId,
+          }));
+
+          let { data: inserted, error: insertError } = await supabase
             .from("findings")
-            .insert(
-              review.allFindings.map((finding) => ({
-                submission_id: selected.id,
-                type: finding.type,
-                severity: finding.severity,
-                message: finding.message,
-                citation: finding.citation,
-                source_passage: finding.sourcePassage,
-                intent_summary: finding.intentSummary ?? null,
-                suggestion: finding.suggestion ?? null,
-                status: "pending",
-              }))
-            )
+            .insert(rows)
             .select("*");
+
+          // Before migration 0004 there is no rule_id column: save the finding
+          // anyway, and let per-rule precision attribute it by message.
+          if (insertError && isMissingColumnError(insertError)) {
+            const fallback = await supabase
+              .from("findings")
+              .insert(rows.map(({ rule_id: _ruleId, ...rest }) => rest))
+              .select("*");
+            inserted = fallback.data;
+            insertError = fallback.error;
+          }
 
           if (insertError) {
             setNotice("Findings were generated but could not be saved. Check the findings table policy.");
           } else if (inserted) {
-            setFindings((inserted as Finding[]).map(storedFindingToPipeline));
+            // Keep the anchor: the stored row has no locator column, so resolve
+            // it from the segments this review was built from.
+            setFindings(
+              (inserted as Finding[]).map((row) => ({
+                ...storedFindingToPipeline(row),
+                locator: locatorForFinding(row, review.segments),
+              }))
+            );
           }
         }
       } catch (err) {
@@ -263,10 +348,24 @@ export default function ReviewDashboard() {
   async function setFindingStatus(findingId: string, status: "accepted" | "rejected") {
     setFindings((rows) => rows.map((row) => (row.id === findingId ? { ...row, status } : row)));
     if (!supabase) return;
-    const { error: updateError } = await supabase
+    const reviewer = await currentReviewer();
+    const payload = {
+      status,
+      reviewed_by: reviewer,
+      reviewed_at: new Date().toISOString(),
+    };
+
+    let { error: updateError } = await supabase
       .from("findings")
-      .update({ status })
+      .update(payload)
       .eq("id", findingId);
+
+    if (updateError && isMissingColumnError(updateError)) {
+      // No reviewer columns yet: record the decision itself.
+      const retry = await supabase.from("findings").update({ status }).eq("id", findingId);
+      updateError = retry.error;
+    }
+
     if (updateError) setError("Could not save that decision.");
   }
 
@@ -285,11 +384,24 @@ export default function ReviewDashboard() {
 
         const pending = findings.filter((f) => f.status === "pending");
         if (pending.length > 0) {
-          await supabase
+          const decided = status === "approved" ? "accepted" : "rejected";
+          const reviewer = await currentReviewer();
+          const { error: bulkError } = await supabase
             .from("findings")
-            .update({ status: status === "approved" ? "accepted" : "rejected" })
+            .update({
+              status: decided,
+              reviewed_by: reviewer,
+              reviewed_at: new Date().toISOString(),
+            })
             .eq("submission_id", selected.id)
             .eq("status", "pending");
+          if (bulkError && isMissingColumnError(bulkError)) {
+            await supabase
+              .from("findings")
+              .update({ status: decided })
+              .eq("submission_id", selected.id)
+              .eq("status", "pending");
+          }
         }
 
         setSubmissions((rows) =>
@@ -329,6 +441,21 @@ export default function ReviewDashboard() {
     if (query.trim() && !item.title.toLowerCase().includes(query.trim().toLowerCase())) return false;
     return true;
   });
+
+  const segments = React.useMemo(() => {
+    if (result?.segments?.length) return result.segments;
+    return parseSegments(selected?.text_content);
+  }, [result, selected?.text_content]);
+
+  const documentGroups = React.useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const segment of segments) {
+      const name = documentNameFromLabel(segment.label);
+      if (!name) continue;
+      counts.set(name, (counts.get(name) ?? 0) + 1);
+    }
+    return [...counts.entries()].map(([name, pages]) => ({ name, pages }));
+  }, [segments]);
 
   const openCount = submissions.filter((item) => ["submitted", "under_review"].includes(item.status)).length;
   const pendingFindings = findings.filter((finding) => finding.status === "pending").length;
@@ -488,16 +615,43 @@ export default function ReviewDashboard() {
                       <Spinner className="h-3.5 w-3.5" /> Running rules
                     </span>
                   ) : (
-                    <span className="text-[11px] text-ink-300">
-                      {findings.length} finding{findings.length === 1 ? "" : "s"} · {pendingFindings} pending
-                    </span>
+                    <div className="flex items-center gap-3">
+                      <span className="text-[11px] text-ink-300">
+                        {findings.length} finding{findings.length === 1 ? "" : "s"} · {pendingFindings} pending
+                      </span>
+                      <Link
+                        href={`/audit?submission=${selected.id}`}
+                        className="btn-secondary btn-sm"
+                        title="Open the frozen audit record for this submission"
+                      >
+                        Audit record
+                      </Link>
+                    </div>
                   )}
                 </div>
 
                 <div className="p-5">
-                  <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-ink-400">
-                    Submitted content
-                  </p>
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-ink-400">
+                      Submitted content
+                    </p>
+                    {documentGroups.length > 0 ? (
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <Badge tone="neutral">
+                          {documentGroups.length} document{documentGroups.length === 1 ? "" : "s"} · one verdict
+                        </Badge>
+                        {documentGroups.map((group) => (
+                          <span
+                            key={group.name}
+                            className="rounded-md bg-ink-100 px-1.5 py-0.5 text-[10px] font-medium text-ink-500"
+                            title={`${group.pages} page${group.pages === 1 ? "" : "s"} read`}
+                          >
+                            {group.name} · {group.pages}
+                          </span>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
 
                   {selected.content_type === "image" && selected.image_url ? (
                     <div className="mt-2 overflow-hidden rounded-xl border border-ink-100 bg-ink-50">
@@ -508,7 +662,7 @@ export default function ReviewDashboard() {
 
                   {result?.contentText || selected.text_content ? (
                     <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-xl border border-ink-100 bg-ink-50/50 px-4 py-3 font-sans text-[13px] leading-relaxed text-ink-700 scrollbar-slim">
-                      {result?.contentText || selected.text_content}
+                      {stripAnchors(result?.contentText || selected.text_content)}
                     </pre>
                   ) : (
                     <div className="mt-2 rounded-xl border border-dashed border-ink-200 px-4 py-6 text-center text-[13px] text-ink-400">
@@ -593,6 +747,14 @@ export default function ReviewDashboard() {
                               <Badge tone={finding.origin === "ai" ? "brand" : "neutral"}>
                                 {finding.origin === "ai" ? "AI judgement" : "Rule engine"}
                               </Badge>
+                              {finding.locator ? (
+                                <span
+                                  className="max-w-[11rem] truncate rounded-md bg-ink-100 px-1.5 py-0.5 text-[10px] font-semibold text-ink-500"
+                                  title="Where this finding sits in the submitted document"
+                                >
+                                  {finding.locator}
+                                </span>
+                              ) : null}
                             </div>
                             {finding.status !== "pending" ? (
                               <Badge tone={finding.status === "accepted" ? "success" : "neutral"}>
@@ -669,6 +831,41 @@ export default function ReviewDashboard() {
                   </ul>
                 )}
               </div>
+
+              {result && result.suppressed.length > 0 ? (
+                <Card className="border-amber-200 bg-amber-50/40 p-5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p className="text-[13px] font-semibold text-ink-900">
+                      Excused by an active exemption
+                    </p>
+                    <Badge tone="warning">
+                      {result.suppressed.length} suppressed
+                    </Badge>
+                  </div>
+                  <p className="mt-0.5 text-[11px] text-ink-500">
+                    The engine raised these findings, then an in-date exemption scoped to this work
+                    suppressed them. They are recorded, not deleted — the audit pack carries the
+                    decision, its owner and its expiry.
+                  </p>
+                  <ul className="mt-3 space-y-2 border-t border-amber-200/60 pt-3">
+                    {result.suppressed.map(({ finding, exemption }) => (
+                      <li key={`exempt-${finding.id}`}>
+                        <p className="text-[12px] font-medium text-ink-700">{finding.message}</p>
+                        <p className="mt-0.5 text-[11px] text-ink-500">
+                          {describeExemption(exemption)} · {exemption.owner} · expires{" "}
+                          {new Date(exemption.expiresAt).toLocaleDateString(undefined, {
+                            day: "numeric",
+                            month: "short",
+                            year: "numeric",
+                          })}{" "}
+                          ({daysUntilExpiry(exemption)} day{daysUntilExpiry(exemption) === 1 ? "" : "s"})
+                        </p>
+                        <p className="mt-0.5 text-[11px] italic text-ink-400">“{exemption.reason}”</p>
+                      </li>
+                    ))}
+                  </ul>
+                </Card>
+              ) : null}
 
               {rejected.length > 0 ? (
                 <details className="card group p-5">

@@ -1,0 +1,117 @@
+{
+  "note": "Labelled fixtures for the deterministic rule engine. Every expected finding is something a brand reviewer would agree is a real problem; every document with an empty expectation is a false-positive guard. Add cases here before changing a rule's behaviour.",
+  "version": 1,
+  "kit": {
+    "id": "eval-kit",
+    "name": "Lumen Analytics",
+    "organization_id": "eval-org",
+    "guidelines": {
+      "voice": [
+        "Write in plain, confident English. Short sentences, no hype.",
+        "Always address the reader as \"you\"; never use \"we\" to mean the customer."
+      ],
+      "accessibility": [
+        "Every image must carry descriptive alt text of at least five words.",
+        "Text must reach a 4.5:1 contrast ratio against its background."
+      ],
+      "logo": [
+        "Use only the approved primary logo from the brand kit. Never recolour it."
+      ],
+      "claims": [
+        "Numbers and superlatives must appear in the approved facts before publishing."
+      ]
+    },
+    "glossary": {
+      "banned": [
+        { "term": "AI-generated", "replacement": "AI-assisted" },
+        { "term": "revolutionary", "replacement": "meaningfully different" }
+      ],
+      "preferred": [
+        { "term": "utilize", "replacement": "use" },
+        { "term": "leverage", "replacement": "build on" }
+      ]
+    },
+    "facts": [
+      { "label": "Founded", "value": "2019" },
+      { "label": "Customers", "value": "4,200 teams" },
+      { "label": "Uptime", "value": "99.98%" }
+    ],
+    "palette": [
+      { "name": "Ink", "hex": "#0E1120" },
+      { "name": "Iris", "hex": "#5B5BD6" },
+      { "name": "Mint", "hex": "#10B981" },
+      { "name": "Canvas", "hex": "#F6F7FB" }
+    ],
+    "logo_url": "https://cdn.lumen.example/brand/lumen-logo-primary.svg",
+    "created_at": "2026-08-01T00:00:00.000Z",
+    "updated_at": "2026-11-01T00:00:00.000Z"
+  },
+  "documents": [
+    {
+      "id": "banned-and-preferred",
+      "note": "One banned term and one preferred term in the same paragraph.",
+      "text": "Our revolutionary platform helps teams utilize the data they already have.",
+      "expect": [
+        { "ruleId": "glossary.banned", "contains": "revolutionary" },
+        { "ruleId": "glossary.preferred", "contains": "utilize" }
+      ]
+    },
+    {
+      "id": "unsupported-stat",
+      "note": "A percentage that no approved fact covers.",
+      "text": "Teams move 63% faster on our platform.",
+      "expect": [{ "ruleId": "claim.unsupported_stat", "contains": "63%" }]
+    },
+    {
+      "id": "superlative",
+      "note": "Unprovable superlative, no supporting fact.",
+      "text": "Signal Studio is the best-in-class way to turn raw events into decisions.",
+      "expect": [{ "ruleId": "claim.superlative", "contains": "best" }]
+    },
+    {
+      "id": "founded-year",
+      "note": "A year that contradicts the approved founding fact, reported once and not also as a statistic.",
+      "text": "Founded in 2017, Lumen Analytics now serves teams in 30 countries.",
+      "expect": [{ "ruleId": "claim.fact_conflict", "contains": "2017" }]
+    },
+    {
+      "id": "missing-alt-markdown",
+      "note": "Markdown image with empty alt text.",
+      "text": "Launch banner\n\n![](https://cdn.lumen.example/media/banner.png)",
+      "expect": [{ "ruleId": "asset.missing_alt", "contains": "banner.png" }]
+    },
+    {
+      "id": "html-image-without-alt",
+      "note": "HTML image with no alt attribute. It is not a logo, so it must not be judged as one.",
+      "text": "<img src=\"https://cdn.lumen.example/media/hero.png\">",
+      "expect": [{ "ruleId": "asset.missing_alt" }]
+    },
+    {
+      "id": "off-palette-hex",
+      "note": "A colour outside the palette, which also fails contrast against the brand paper.",
+      "text": "Accent for the banner: #FF6B00.",
+      "expect": [
+        { "ruleId": "colour.off_palette", "contains": "#FF6B00" },
+        { "ruleId": "colour.low_contrast", "contains": "#FF6B00" }
+      ]
+    },
+    {
+      "id": "declared-legacy-logo",
+      "note": "An image that declares itself as a logo but is not the approved asset.",
+      "text": "<img src=\"https://cdn.lumen.example/media/legacy-logo.png\" alt=\"Lumen logo\">",
+      "expect": [{ "ruleId": "logo.unapproved_asset", "contains": "legacy-logo.png" }]
+    },
+    {
+      "id": "clean-copy",
+      "note": "False-positive guard: on-brand copy with approved numbers, palette colour, alt text and no logo misuse.",
+      "text": "Lumen Analytics helps 4,200 teams turn raw events into decisions.\n\nSince 2019, the product has run at 99.98% uptime. Signal Studio reads the events you already collect and turns them into a review queue your team can act on.\n\n![A dashboard showing the Signal Studio review queue](https://cdn.lumen.example/media/queue.png)\n\nHighlight colour: #5B5BD6.",
+      "expect": []
+    },
+    {
+      "id": "approved-logo",
+      "note": "False-positive guard: the approved logo asset, with alt text.",
+      "text": "<img src=\"https://cdn.lumen.example/brand/lumen-logo-primary.svg\" alt=\"Lumen Analytics logo\">",
+      "expect": []
+    }
+  ]
+}

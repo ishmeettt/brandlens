@@ -97,6 +97,10 @@ export interface ContentSubmission {
   pdf_url?: string | null;
   created_at: string;
   updated_at?: string;
+  /** Reviewer who owns the review. Added by migration 0004. */
+  owner_id?: string | null;
+  /** Committed deadline; overrides the SLA policy derivation. Migration 0004. */
+  due_at?: string | null;
 }
 
 export type FindingType =
@@ -120,7 +124,34 @@ export interface Finding {
   source_passage?: string | null;
   intent_summary?: string | null;
   suggestion?: string | null;
+  /** Exact engine rule that raised this finding. Added by migration 0004. */
+  rule_id?: string | null;
   status: "pending" | "accepted" | "rejected";
   created_at: string;
   updated_at?: string;
+  /** Who decided, and when. Added by migration 0004; null until then. */
+  reviewed_by?: string | null;
+  reviewed_at?: string | null;
+}
+
+/**
+ * True when a write failed because the workspace has not applied a migration
+ * yet. Callers retry without the new columns, so the app keeps working before
+ * and after migration 0004.
+ */
+export function isMissingColumnError(error: unknown): boolean {
+  const message =
+    typeof error === "string"
+      ? error
+      : ((error as { message?: string; details?: string } | null)?.message ?? "") +
+        " " +
+        ((error as { details?: string } | null)?.details ?? "");
+  return /42703|PGRST204|column .* does not exist|could not find the '.*' column/i.test(message);
+}
+
+/** The signed-in reviewer, used to attribute decisions in the log. */
+export async function currentReviewer(): Promise<string | null> {
+  if (!supabase) return null;
+  const { data } = await supabase.auth.getUser();
+  return data.user?.email ?? null;
 }

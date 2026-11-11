@@ -1,0 +1,181 @@
+BrandLens — Round 3 status
+=========================
+
+Written 11 November 2026. This file records what was built, which promises are
+met, what is still missing, and what the owner must do. The repository is the
+source of truth; this is the summary.
+
+The three Round 3 promises, in short:
+  1. Ingest the content teams actually ship (real documents, not pasted text).
+  2. Governance operations (owners, deadlines, exemptions, audit export).
+  3. Trust and measurement (measured accuracy, tamper-evident history).
+
+
+1. INGESTION — COMPLETE EXCEPT SCANNED PDFs
+-------------------------------------------
+
+Done
+  - PDF and DOCX are parsed into page- or paragraph-anchored segments.
+    PDF: `p.4`. DOCX: `¶ 12 · Pricing` (nearest heading carried into the label).
+  - Parsing runs on the server at POST /api/extract (Node runtime, pdf.js legacy
+    build) with the in-browser parser as a fallback. Both paths return the same
+    ExtractedDocument, so locators are identical either way.
+  - Several files can be submitted as ONE set: `[[Autumn deck · p.4]]` markers,
+    per-document chips (pages/characters), combined totals, and one combined
+    verdict.
+  - Every finding is offered a locator derived from the offending token (quoted
+    term, hex, percentage, asset name). Locators are restored after a reload
+    from the stored text, not only at generation time.
+  - Anchors are stored inside `text_content` as marker lines, so they travel into
+    exports and the audit record without a schema change.
+  - Extraction caps: 80 pages / 400 paragraphs / 300k characters, with a
+    `truncated` flag.
+
+Verified
+  - POST /api/extract against the 7-page submission pack: `parsed: server`,
+    7 pages, 12,371 characters, labels p.1 … p.7.
+  - Browser batch upload of two 7-page PDFs: `2 documents · 14 pages · 4,486
+    words · 24,768 characters`, chips `Autumn deck · 7` / `Launch brief · 7`,
+    locators `Autumn deck · p.4`.
+
+Not done
+  - Scanned PDFs with no text layer still ask the reviewer to resubmit as an
+    image (OCR path exists for images; automatic PDF → OCR routing does not).
+  - DOCX is covered by unit checks but has never been run against a real Word
+    file supplied by a user.
+
+
+2. GOVERNANCE OPERATIONS — COMPLETE EXCEPT SAVED OWNERS
+-------------------------------------------------------
+
+Done
+  - Policy clock on Admin: target review time derived from the worst severity
+    (critical 1d, high 3d, medium 5d, low 7d), with a stored `due_at` winning
+    over the derivation.
+  - Owner and due-date controls on the Admin queue, writing
+    `content_submissions.owner_id` / `due_at`.
+  - Scoped, expiring exemptions stored in `brand_kits.guidelines.exemptions`:
+    rule id (or family prefix), optional target text, optional submission, owner,
+    reason, expiry. Editable on the brand-kit page.
+  - The engine suppresses exempt findings and reports them separately; the review
+    shows "Excused by an active exemption" with the owner, reason and days left.
+    This also applies to ALREADY REVIEWED submissions: an exemption granted today
+    changes the queue immediately, without waiting for a fresh review.
+  - Lapsed exemptions stop applying on their own; the audit record keeps the
+    decision, its owner and its expiry.
+  - Exemptions are never citable clauses (they are skipped by
+    normaliseGuidelines), so a decision cannot be cited as policy.
+  - Audit record at /audit?submission=…: printable (Print → Save as PDF) and a
+    JSON download with SHA-256 digest, citations, decisions, engine
+    reconciliation, anchors and exemptions.
+  - Decision feed at /audit/log: reviewer, timestamp, finding, clause, decision,
+    each entry hashed with the previous one; the page verifies the chain.
+
+Verified
+  - Owner save without migration 0004 is refused and rolled back with an explicit
+    "Owners and due dates need migration 0004" message (no silent failure).
+  - Granted a real exemption on the live kit, opened a stored submission: active
+    findings dropped 3 → 2, card showed rule, target, owner, expiry and reason.
+    Removed it again: back to 3 findings, kit restored.
+  - Seeded demo kit carries one active and one lapsed exemption.
+
+Not done / blocked
+  - Migration 0004 is NOT applied to the hosted database. The agent's service key
+    cannot run DDL. Until the SQL is pasted into the Supabase SQL editor:
+      * owners and due dates cannot be saved,
+      * reviewers shown in the decision feed read "Unattributed",
+      * findings carry no stored `rule_id` (precision is recovered by re-running
+        the engine instead),
+      * the `audit_events` table exists only after the migration.
+  - `audit_events` is created by migration 0004 but the app does not write to it
+    yet. The feed is a verifiable chain derived from stored findings; true
+    append-only storage is a follow-up change.
+  - No "mine / overdue" queue filter (nice-to-have, not a stated promise).
+
+
+3. TRUST AND MEASUREMENT — COMPLETE EXCEPT SSO
+----------------------------------------------
+
+Done
+  - Labelled evaluation corpus (`evals/corpus.json`): 10 documents, 9 rules,
+    2 false-positive guards.
+  - Replay harness `npm run eval:rules`: precision and recall per rule, exits
+    non-zero on any miss or unexpected finding.
+  - Per-rule precision AND false-positive rate on Admin, with a thin-sample
+    marker (below 5 decisions) and a separate "Unattributed (legacy finding)"
+    bucket instead of folding unknown findings into a rule's score.
+  - Hash-chained decision log: editing, reordering or deleting an entry breaks
+    the chain at the exact index (tested).
+  - Reconciliation in the audit record: which stored findings the current engine
+    still reproduces, and which findings it would raise today that were never
+    recorded.
+
+Verified
+  - Corpus replay: precision 100% / recall 100%.
+  - Chain verification: intact over the demo set; broken at #2 when one entry is
+    edited; broken at #1 when one is deleted.
+
+Blocked
+  - SSO / SAML needs a paid Supabase plan and an identity provider the owner
+    controls. Nothing can be implemented or verified from here.
+
+
+BUGS FOUND AND FIXED IN THIS AUDIT
+----------------------------------
+
+1. Marker lines longer than 60 characters were not recognised, so a DOCX set
+   anchor leaked `[[…]]` into the text the rules read and the audit record
+   reported "no anchors". Cap raised to 200, heading labels capped at 40.
+2. Two files with the same short name produced identical anchors; duplicates are
+   now numbered (`Brief (2) · p.1`).
+3. A batch of PDFs was recorded with paragraph anchors because anchor kind was
+   inferred from the first label; it now inspects every label for `¶`.
+4. Exemptions were ignored on already-reviewed submissions: stored findings had
+   no rule id, and the engine's message wording had changed since the finding was
+   stored. The review now asks the deterministic engine which findings an
+   exemption covers and falls back to the quoted term plus rule family.
+5. A stale comment claimed extraction is browser-only; corrected.
+
+
+VERIFICATION COMMANDS AND EXPECTED RESULTS
+------------------------------------------
+
+  npm run build            -> succeeds, 13 routes
+  npx tsc --noEmit         -> no errors
+  npm run eval:rules       -> precision 100%, recall 100%, exit 0
+  npm run test:governance  -> 43 checks, 0 failures
+  npm run verify:supabase  -> schema and policy checks (no DDL)
+
+
+WHAT THE OWNER STILL NEEDS TO DO
+--------------------------------
+
+Required
+  1. Apply `supabase/migrations/20240101000004_governance_ops.sql` in the
+     Supabase SQL editor (project uxjnauxumkevhszoylfb). Confirm with:
+       select table_name, column_name from information_schema.columns
+       where table_schema = 'public' and column_name in
+         ('owner_id','due_at','rule_id','reviewed_by','reviewed_at');
+     Expect 5 rows.
+  2. Revoke the Supabase personal access token shared earlier; it has been
+     exposed and is no longer needed.
+
+Optional / future work
+  3. Scanned PDF → OCR routing (render page to canvas, then reuse the OCR path).
+  4. Try a real .docx end to end and keep one in the corpus.
+  5. Write every decision into `audit_events` after migration 0004, making the
+     feed append-only at storage level rather than derived.
+  6. SSO/SAML once a Supabase plan and IdP are available.
+  7. Add a "mine / overdue" filter to the review queue.
+  8. Remove the two 60 KB test PDFs left in the `content-submissions` storage
+     bucket by deleted test submissions.
+
+
+NOTES
+-----
+
+  - The app runs read-only in demo mode with no environment variables and never
+    falls back to fabricated citations.
+  - Every finding cites a real clause; evidence or silence.
+  - Live site: https://site-4dde5f48239247f79cb0cf1b59ab161c.freebuff.page
+  - Repository: https://github.com/ishmeettt/brandlens

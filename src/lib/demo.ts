@@ -1,6 +1,8 @@
+import { runDeterministicRules } from "./rules";
 import type {
   BrandKit,
   ContentSubmission,
+  Finding,
   UserProfile,
 } from "./supabase";
 
@@ -27,6 +29,31 @@ export const demoBrandKit: BrandKit = {
     ],
     claims: [
       "Numbers and superlatives must appear in the approved facts before publishing.",
+    ],
+    // Governance decisions, not clauses: the engine honours these and reports
+    // every finding it suppressed. Past expiry, an exemption simply stops.
+    exemptions: [
+      {
+        id: "ex-2201",
+        ruleId: "glossary.preferred",
+        target: "utilize",
+        submissionId: "sub-1041",
+        reason:
+          "Recruiter microsite is co-branded with the search partner, whose house style requires \"utilize\".",
+        owner: "Priya Raman · Brand Ops",
+        grantedAt: daysAgo(6),
+        expiresAt: new Date(base + 12 * 86_400_000).toISOString(),
+      },
+      {
+        id: "ex-2188",
+        ruleId: "claim.superlative",
+        target: "best",
+        submissionId: "sub-1042",
+        reason: "Analyst quote cleared for the launch post while the citation is re-verified.",
+        owner: "Marco Diaz · Product Marketing",
+        grantedAt: daysAgo(40),
+        expiresAt: daysAgo(2),
+      },
     ],
   },
   glossary: {
@@ -98,6 +125,22 @@ Before Lumen, the risk team rebuilt the same spreadsheet every Monday. Now the n
     created_at: daysAgo(5),
   },
   {
+    id: "sub-1038",
+    brand_kit_id: demoBrandKit.id,
+    title: "Autumn launch: deck + brochure",
+    content_type: "pdf",
+    status: "submitted",
+    text_content: [
+      "[[Autumn deck · p.1]]",
+      "Lumen autumn release — AI-generated forecasting for every team.",
+      "[[Autumn deck · p.2]]",
+      "Forecasts land 71% sooner, and every number is guaranteed correct.",
+      "[[Launch brochure · p.1]]",
+      "Built for teams who utilize messy data. Accent colour: #FF6B00.",
+    ].join("\n\n"),
+    created_at: daysAgo(3, 2),
+  },
+  {
     id: "sub-1039",
     brand_kit_id: demoBrandKit.id,
     title: "Homepage banner (OCR)",
@@ -146,3 +189,48 @@ export const demoProfiles: UserProfile[] = [
 ];
 
 export const demoOrgName = "Lumen Analytics";
+
+/**
+ * Findings the demo workspace shows for its seeded submissions.
+ *
+ * The findings themselves are real: they come from running the deterministic
+ * engine over the sample copy. The decisions are sample data, so the precision
+ * and audit views have something to render without a live reviewer.
+ */
+export function buildDemoFindings(): Finding[] {
+  return demoSubmissions.flatMap((submission) => {
+    const findings = runDeterministicRules(submission.text_content ?? "", demoBrandKit);
+    return findings.map((finding, index) => {
+      const status: Finding["status"] =
+        submission.status === "approved"
+          ? "accepted"
+          : submission.status === "under_review" && index % 3 === 1
+            ? "rejected"
+            : "pending";
+
+      const createdAt = new Date(
+        new Date(submission.created_at).getTime() + index * 60_000
+      ).toISOString();
+      const reviewer = ["Priya Raman", "Marco Diaz", "Sam Okafor"][index % 3];
+
+      return {
+        id: `demo-${submission.id}-${index}`,
+        submission_id: submission.id,
+        type: finding.type,
+        severity: finding.severity,
+        message: finding.message,
+        citation: finding.citation,
+        source_passage: finding.sourcePassage,
+        suggestion: finding.suggestion ?? null,
+        intent_summary: null,
+        status,
+        created_at: createdAt,
+        reviewed_by: status === "pending" ? null : reviewer,
+        reviewed_at:
+          status === "pending"
+            ? null
+            : new Date(new Date(createdAt).getTime() + 5 * 3_600_000).toISOString(),
+      };
+    });
+  });
+}

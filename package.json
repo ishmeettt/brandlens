@@ -8,11 +8,15 @@
     "start": "next start",
     "lint": "eslint",
     "verify:supabase": "node --env-file-if-exists=.env.local scripts/verify-flow.mjs",
+    "eval:rules": "node scripts/eval-rules.mjs",
+    "test:governance": "node scripts/test-governance.mjs",
     "seed:demo": "node scripts/seed-demo.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.119.0",
+    "mammoth": "^1.11.0",
     "next": "16.4.5",
+    "pdfjs-dist": "^4.10.38",
     "react": "19.3.0",
     "react-dom": "19.3.0",
     "tesseract.js": "^7.0.0"

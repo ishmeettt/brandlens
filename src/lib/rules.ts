@@ -5,6 +5,7 @@
  * That is the evidence-or-silence principle in code: no approved source, no flag.
  */
 
+import { EXEMPTIONS_KEY, coversFinding, parseExemptions, type Exemption } from "./exemptions";
 import type { BrandKit, FindingType, Severity } from "./supabase";
 
 export type RuleType = FindingType;
@@ -250,6 +251,8 @@ function normaliseGuidelines(value: unknown): Array<{ label: string; text: strin
   if (typeof value === "object") {
     const out: Array<{ label: string; text: string }> = [];
     for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
+      // Exemptions are governance decisions, not clauses the engine may cite.
+      if (key === EXEMPTIONS_KEY) continue;
       const label = key.replace(/[_-]/g, " ");
       const lines = textLines(raw);
       for (const line of lines) {
@@ -431,10 +434,24 @@ export interface DeterministicOptions {
   includeAssets?: boolean;
 }
 
-export function runDeterministicRules(
-  content: string,
-  kit?: BrandKit | null
-): RuleFinding[] {
+export interface RuleRunOptions {
+  /** Exemptions only apply inside the submission they were scoped to. */
+  submissionId?: string | null;
+  /** Injectable clock so the expiry boundary can be tested. */
+  at?: Date;
+}
+
+export interface SuppressedFinding {
+  finding: RuleFinding;
+  exemption: Exemption;
+}
+
+export interface RuleRun {
+  findings: RuleFinding[];
+  suppressed: SuppressedFinding[];
+}
+
+function computeRules(content: string, kit?: BrandKit | null): RuleFinding[] {
   const text = content ?? "";
   if (!kit || !text.trim()) return [];
 
@@ -503,10 +520,16 @@ export function runDeterministicRules(
     const claimSource =
       claimPassage?.text ?? facts.map((fact) => `${fact.label}: ${fact.value}`).join(" · ");
 
-    const numeric = text.match(/\b\d+(?:[.,]\d+)?\s?(?:%|percent|x|×)?\b/gi) ?? [];
+    // No trailing \b: "%" and "×" are non-word characters, so a boundary
+    // after them never matches before a space — "63% faster" used to be read
+    // as "63" and skipped as too short.
+    const numeric = text.match(/\b\d+(?:[.,]\d+)?(?:\s?(?:%|percent|×|x))?/gi) ?? [];
     const suspicious = new Set<string>();
     for (const raw of numeric) {
       const value = raw.trim().toLowerCase();
+      // Years belong to the founding-date rule below; counting them as
+      // unapproved statistics reported the same problem twice.
+      if (/^(19|20)\d{2}$/.test(value)) continue;
       if (!/(%|percent|x|×)/.test(value) && value.replace(/\D/g, "").length < 3) continue;
       if (approvedValues.includes(value.replace(/\s/g, ""))) continue;
       if (approvedValues.includes(value)) continue;
@@ -630,20 +653,32 @@ export function runDeterministicRules(
         });
       }
 
-      const onLight = contrastRatio(normalisedHex, "#FFFFFF");
-      const onDark = contrastRatio(normalisedHex, "#0E1120");
-      const best = Math.max(onLight, onDark);
-      if (best < 3) {
-        findings.push({
-          ruleId: "colour.low_contrast",
-          type: "contrast",
-          severity: "high",
-          message: `${normalisedHex} has a contrast ratio of ${best.toFixed(2)}:1 against both light and dark text surfaces.`,
-          citation: `Palette · ${nearestColour(normalisedHex, palette)?.name ?? palettePassage.label}`,
-          sourcePassage: palettePassage.text,
-          suggestion: "Darken or lighten the colour until it reaches at least 4.5:1.",
-          confidence: 1,
-        });
+      // Contrast needs a surface to be measured against. We use the brand's
+      // own paper — the lightest approved colour — and name it in the finding,
+      // because the assumption has to be visible for the finding to be
+      // arguable. Taking the best of white and near-black made this rule
+      // unreachable: for any colour, one of those two is at least 4.35:1, so
+      // the old `best < 3` test could never fire.
+      const paper = palette.reduce((lightest, entry) =>
+        relativeLuminance(entry.hex) > relativeLuminance(lightest.hex) ? entry : lightest
+      );
+      if (
+        relativeLuminance(paper.hex) > 0.5 &&
+        normalisedHex !== paper.hex.toUpperCase()
+      ) {
+        const ratio = contrastRatio(normalisedHex, paper.hex);
+        if (ratio < 4.5) {
+          findings.push({
+            ruleId: "colour.low_contrast",
+            type: "contrast",
+            severity: ratio < 3 ? "high" : "medium",
+            message: `${normalisedHex} reaches only ${ratio.toFixed(2)}:1 against ${paper.name} (${paper.hex}), below the 4.5:1 floor.`,
+            citation: `Palette · ${paper.name}`,
+            sourcePassage: palettePassage.text,
+            suggestion: "Darken the colour, or set it on a darker approved surface instead of the paper.",
+            confidence: 1,
+          });
+        }
       }
     }
   }
@@ -652,12 +687,17 @@ export function runDeterministicRules(
   if (kit.logo_url) {
     const logoPassage = passages.find((p) => p.id === "logo-approved");
     const logoGuideline = guidelinePassage(/logo/);
-    const sources = [...text.matchAll(/<img\b[^>]*src\s*=\s*["']([^"']+)["'][^>]*>/gi)].map(
-      (m) => m[1]
-    );
+    // Only an image that presents itself as a logo is judged as one. Treating
+    // every <img> as a logo candidate flagged ordinary photography as an
+    // unapproved brand asset, which is the kind of finding that teaches a
+    // reviewer to ignore the queue.
+    const sources = [...text.matchAll(/<img\b[^>]*>/gi)]
+      .filter((m) => /logo/i.test(m[0]))
+      .map((m) => /src\s*=\s*["']([^"']+)["']/i.exec(m[0])?.[1])
+      .filter((src): src is string => Boolean(src));
     if (logoPassage && sources.length > 0) {
       for (const src of sources) {
-        if (src === kit.logo_url || src.includes("logo")) continue;
+        if (src === kit.logo_url) continue;
         findings.push({
           ruleId: "logo.unapproved_asset",
           type: "logo",
@@ -684,6 +724,57 @@ export function runDeterministicRules(
     .sort((a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity])
     .slice(0, 60);
 }
+
+/**
+ * Run every rule, then apply the kit's active exemptions. Suppressed findings
+ * are returned rather than dropped, so the review and the audit record can say
+ * what was excused, by whom, and until when.
+ */
+export function runRuleSet(
+  content: string,
+  kit?: BrandKit | null,
+  options: RuleRunOptions = {}
+): RuleRun {
+  const all = computeRules(content, kit);
+  const exemptions = kit ? parseExemptions(kit.guidelines) : [];
+  if (exemptions.length === 0) return { findings: all, suppressed: [] };
+
+  const at = options.at ?? new Date();
+  const findings: RuleFinding[] = [];
+  const suppressed: SuppressedFinding[] = [];
+
+  for (const finding of all) {
+    const exemption = exemptions.find((candidate) =>
+      coversFinding(candidate, finding, { submissionId: options.submissionId, at })
+    );
+    if (exemption) suppressed.push({ finding, exemption });
+    else findings.push(finding);
+  }
+
+  return { findings, suppressed };
+}
+
+/** Findings only — the engine with exemptions already honoured. */
+export function runDeterministicRules(
+  content: string,
+  kit?: BrandKit | null,
+  options: RuleRunOptions = {}
+): RuleFinding[] {
+  return runRuleSet(content, kit, options).findings;
+}
+
+/** Human labels for the precise rule ids the engine emits. */
+export const RULE_LABELS: Record<string, string> = {
+  "glossary.banned": "Banned term",
+  "glossary.preferred": "Preferred wording",
+  "claim.unsupported_stat": "Unapproved statistic",
+  "claim.superlative": "Unprovable superlative",
+  "claim.fact_conflict": "Conflicts with an approved fact",
+  "asset.missing_alt": "Missing alt text",
+  "colour.off_palette": "Off-palette colour",
+  "colour.low_contrast": "Low contrast",
+  "logo.unapproved_asset": "Unapproved logo",
+};
 
 export const RULE_CATALOGUE: Array<{
   type: RuleType;
@@ -713,11 +804,11 @@ export const RULE_CATALOGUE: Array<{
   {
     type: "contrast",
     label: "Contrast",
-    description: "WCAG 2.1 colour contrast floor of 4.5:1.",
+    description: "WCAG 2.1 contrast against the brand's own paper, floor of 4.5:1.",
   },
   {
     type: "logo",
     label: "Logo",
-    description: "Only the approved logo asset may be embedded.",
+    description: "An image declared as a logo must be the approved asset.",
   },
 ];

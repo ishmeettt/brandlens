@@ -13,15 +13,22 @@ import type {
   FindingType,
   Severity,
 } from "./supabase";
+import type { Exemption } from "./exemptions";
 import {
   brandKitPassages,
   contrastRatio,
   getFindingTypeLabel,
-  runDeterministicRules,
+  runRuleSet,
   validateCitation as validateCitationAgainstPassages,
   type BrandPassage,
   type RuleFinding,
 } from "./rules";
+import {
+  locatorForFinding,
+  parseSegments,
+  stripAnchors,
+  type DocSegment,
+} from "./document-extract";
 
 export type AiStatus = "not_configured" | "ok" | "error";
 
@@ -40,6 +47,8 @@ export interface PipelineFinding {
   origin: "deterministic" | "ai";
   status: "pending" | "accepted" | "rejected";
   createdAt: string;
+  /** Page or paragraph the finding sits in, when the content is anchored. */
+  locator?: string | null;
 }
 
 export interface ReviewSummary {
@@ -53,10 +62,14 @@ export interface ReviewSummary {
 
 export interface ReviewResult {
   contentText: string;
+  /** Anchored segments of a PDF/DOCX submission; empty for plain text. */
+  segments: DocSegment[];
   deterministicFindings: PipelineFinding[];
   aiFindings: PipelineFinding[];
   allFindings: PipelineFinding[];
   rejectedFindings: PipelineFinding[];
+  /** Findings an active, in-date exemption excused, with the decision behind it. */
+  suppressed: Array<{ finding: PipelineFinding; exemption: Exemption }>;
   summary: ReviewSummary;
   aiStatus: AiStatus;
   aiMessage?: string;
@@ -80,7 +93,9 @@ function newId(): string {
 /* ------------------------------------------------------------------ */
 
 export function extractTextContent(submission: ContentSubmission): string {
-  const text = (submission.text_content ?? "").trim();
+  // Document submissions store `[[p.4]]` marker lines next to their text; the
+  // rules must see prose only.
+  const text = stripAnchors(submission.text_content);
   if (text) return text;
 
   if (submission.content_type === "image") {
@@ -236,6 +251,7 @@ export async function runFullReview(
   options: ReviewOptions = {}
 ): Promise<ReviewResult> {
   const contentText = extractTextContent(submission);
+  const segments = parseSegments(submission.text_content);
   const passages = brandKitPassages(kit);
   const intentSummary =
     options.intentSummary ??
@@ -246,10 +262,12 @@ export async function runFullReview(
   if (!kit || !contentText) {
     return {
       contentText,
+      segments,
       deterministicFindings: [],
       aiFindings: [],
       allFindings: [],
       rejectedFindings: [],
+      suppressed: [],
       summary: {
         total: 0,
         deterministic: 0,
@@ -266,9 +284,15 @@ export async function runFullReview(
     };
   }
 
-  const deterministicRaw = runDeterministicRules(contentText, kit);
+  const ruleRun = runRuleSet(contentText, kit, { submissionId: submission.id });
+  const deterministicRaw = ruleRun.findings;
   const deterministicFindings: PipelineFinding[] = [];
   const rejectedFindings: PipelineFinding[] = [];
+
+  const suppressed = ruleRun.suppressed.map(({ finding, exemption }) => ({
+    finding: toPipelineFinding(submission.id, finding, "deterministic", intentSummary),
+    exemption,
+  }));
 
   for (const raw of deterministicRaw) {
     if (!validateCitationAgainstPassages(raw.citation, passages)) continue;
@@ -315,20 +339,21 @@ export async function runFullReview(
     }
   }
 
-  const allFindings = [...deterministicFindings, ...aiFindings].sort(
-    (a, b) =>
-      SEVERITIES.indexOf(b.severity) - SEVERITIES.indexOf(a.severity)
-  );
+  const allFindings = [...deterministicFindings, ...aiFindings]
+    .map((finding) => ({ ...finding, locator: locatorForFinding(finding, segments) }))
+    .sort((a, b) => SEVERITIES.indexOf(b.severity) - SEVERITIES.indexOf(a.severity));
 
   const bySeverity: Record<Severity, number> = { critical: 0, high: 0, medium: 0, low: 0 };
   for (const finding of allFindings) bySeverity[finding.severity] += 1;
 
   return {
     contentText,
+    segments,
     deterministicFindings,
     aiFindings,
     allFindings,
     rejectedFindings,
+    suppressed,
     summary: {
       total: allFindings.length,
       deterministic: deterministicFindings.length,

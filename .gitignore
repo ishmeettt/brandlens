@@ -45,3 +45,6 @@ next-env.d.ts
 /freebuff-sites-build/
 /.open-next/
 /.wrangler/
+
+# local build scripts (pdf generator, scratch tooling)
+/.build/

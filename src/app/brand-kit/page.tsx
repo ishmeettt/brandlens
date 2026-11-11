@@ -16,7 +16,8 @@ import {
   inputClass,
 } from "../../components/ui";
 import { demoBrandKit } from "../../lib/demo";
-import { RULE_CATALOGUE } from "../../lib/rules";
+import { parseExemptions } from "../../lib/exemptions";
+import { RULE_CATALOGUE, RULE_LABELS } from "../../lib/rules";
 import { isSupabaseConfigured, supabase, type BrandKit } from "../../lib/supabase";
 
 interface GlossaryRow {
@@ -37,6 +38,18 @@ interface GuidelineFields {
   accessibility: string;
   logo: string;
   claims: string;
+}
+
+/** An exemption as the editor holds it: the expiry is a plain date. */
+interface ExemptionRow {
+  id: string;
+  ruleId: string;
+  target: string;
+  submissionId: string;
+  reason: string;
+  owner: string;
+  grantedAt: string;
+  expiresAt: string;
 }
 
 const GUIDELINE_META: Array<{
@@ -150,6 +163,18 @@ export default function BrandKitPage() {
   );
   const [logoUrl, setLogoUrl] = React.useState<string | null>(demo ? demoBrandKit.logo_url ?? null : null);
   const [kitId, setKitId] = React.useState<string | null>(demo ? demoBrandKit.id : null);
+  const [exemptions, setExemptions] = React.useState<ExemptionRow[]>(() =>
+    (demo ? parseExemptions(demoBrandKit.guidelines) : []).map((exemption) => ({
+      id: exemption.id,
+      ruleId: exemption.ruleId,
+      target: exemption.target ?? "",
+      submissionId: exemption.submissionId ?? "",
+      reason: exemption.reason,
+      owner: exemption.owner,
+      grantedAt: exemption.grantedAt,
+      expiresAt: exemption.expiresAt.slice(0, 10),
+    }))
+  );
 
   const [saving, setSaving] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
@@ -184,6 +209,18 @@ export default function BrandKitPage() {
         setFacts(hydrated.facts.length ? hydrated.facts : [{ label: "", value: "" }]);
         setPalette(hydrated.palette.length ? hydrated.palette : [{ name: "Primary", hex: "#5B5BD6" }]);
         setLogoUrl((kit as BrandKit).logo_url ?? null);
+        setExemptions(
+          parseExemptions((kit as BrandKit).guidelines).map((exemption) => ({
+            id: exemption.id,
+            ruleId: exemption.ruleId,
+            target: exemption.target ?? "",
+            submissionId: exemption.submissionId ?? "",
+            reason: exemption.reason,
+            owner: exemption.owner,
+            grantedAt: exemption.grantedAt,
+            expiresAt: exemption.expiresAt.slice(0, 10),
+          }))
+        );
       } catch (err) {
         if (active) setError(err instanceof Error ? err.message : "Could not load the brand kit.");
       } finally {
@@ -242,7 +279,7 @@ export default function BrandKitPage() {
       return;
     }
 
-    const guidelinePayload: Record<string, string[]> = {};
+    const guidelinePayload: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(guidelines)) {
       const lines = value
         .split("\n")
@@ -250,6 +287,28 @@ export default function BrandKitPage() {
         .filter(Boolean);
       if (lines.length > 0) guidelinePayload[key] = lines;
     }
+
+    const incomplete = exemptions.find(
+      (row) => !row.ruleId || !row.reason.trim() || !row.expiresAt || !row.owner.trim()
+    );
+    if (incomplete) {
+      setError("Every exemption needs a rule, an owner, a reason and an expiry date.");
+      return;
+    }
+
+    const exemptionPayload = exemptions.map((row) => ({
+      id: row.id || `ex-${Date.now()}`,
+      ruleId: row.ruleId,
+      ...(row.target.trim() ? { target: row.target.trim() } : {}),
+      ...(row.submissionId.trim() ? { submissionId: row.submissionId.trim() } : {}),
+      reason: row.reason.trim(),
+      owner: row.owner.trim(),
+      grantedAt: row.grantedAt || new Date().toISOString(),
+      // A date means "valid through this day": expire at its end, in UTC.
+      expiresAt: row.expiresAt.length === 10 ? `${row.expiresAt}T23:59:59.000Z` : row.expiresAt,
+    }));
+
+    if (exemptionPayload.length > 0) guidelinePayload.exemptions = exemptionPayload;
 
     const payload = {
       name: name.trim(),
@@ -509,6 +568,133 @@ export default function BrandKitPage() {
               {glossary.length === 0 ? (
                 <p className="rounded-lg border border-dashed border-ink-200 px-4 py-6 text-center text-[13px] text-ink-400">
                   No terms yet — terminology checks stay silent until you add one.
+                </p>
+              ) : null}
+            </div>
+          </Card>
+
+          {/* Exemptions */}
+          <Card>
+            <CardHeader
+              title="Scoped exemptions"
+              description="An exemption excuses one rule for one piece of work until a date, and records who granted it. Once it lapses, the rule applies again."
+              action={
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  onClick={() =>
+                    setExemptions((rows) => [
+                      ...rows,
+                      {
+                        id: "",
+                        ruleId: "claim.superlative",
+                        target: "",
+                        submissionId: "",
+                        reason: "",
+                        owner: "",
+                        grantedAt: new Date().toISOString(),
+                        expiresAt: "",
+                      },
+                    ])
+                  }
+                >
+                  Add exemption
+                </Button>
+              }
+            />
+            <div className="space-y-3 p-5">
+              {exemptions.map((row, index) => (
+                <div key={index} className="rounded-xl border border-ink-100 p-4">
+                  <div className="grid gap-2 sm:grid-cols-3">
+                    <label className="block text-[11px] text-ink-500">
+                      Rule
+                      <select
+                        value={row.ruleId}
+                        onChange={(event) =>
+                          setExemptions(updateRow(exemptions, index, { ruleId: event.target.value }))
+                        }
+                        className={cn(inputClass(), "mt-1")}
+                      >
+                        {Object.entries(RULE_LABELS).map(([ruleId, label]) => (
+                          <option key={ruleId} value={ruleId}>
+                            {label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="block text-[11px] text-ink-500">
+                      Only findings mentioning
+                      <input
+                        value={row.target}
+                        onChange={(event) =>
+                          setExemptions(updateRow(exemptions, index, { target: event.target.value }))
+                        }
+                        placeholder="e.g. utilize"
+                        className={cn(inputClass(), "mt-1")}
+                      />
+                    </label>
+                    <label className="block text-[11px] text-ink-500">
+                      Submission (optional)
+                      <input
+                        value={row.submissionId}
+                        onChange={(event) =>
+                          setExemptions(updateRow(exemptions, index, { submissionId: event.target.value }))
+                        }
+                        placeholder="Whole kit when empty"
+                        className={cn(inputClass(), "mt-1")}
+                      />
+                    </label>
+                  </div>
+                  <div className="mt-2 grid gap-2 sm:grid-cols-[1fr_1.4fr_160px]">
+                    <label className="block text-[11px] text-ink-500">
+                      Granted by
+                      <input
+                        value={row.owner}
+                        onChange={(event) =>
+                          setExemptions(updateRow(exemptions, index, { owner: event.target.value }))
+                        }
+                        placeholder="Name · team"
+                        className={cn(inputClass(), "mt-1")}
+                      />
+                    </label>
+                    <label className="block text-[11px] text-ink-500">
+                      Why
+                      <input
+                        value={row.reason}
+                        onChange={(event) =>
+                          setExemptions(updateRow(exemptions, index, { reason: event.target.value }))
+                        }
+                        placeholder="The decision behind it"
+                        className={cn(inputClass(), "mt-1")}
+                      />
+                    </label>
+                    <label className="block text-[11px] text-ink-500">
+                      Expires
+                      <input
+                        type="date"
+                        value={row.expiresAt}
+                        onChange={(event) =>
+                          setExemptions(updateRow(exemptions, index, { expiresAt: event.target.value }))
+                        }
+                        className={cn(inputClass(), "mt-1")}
+                      />
+                    </label>
+                  </div>
+                  <div className="mt-2 flex justify-end">
+                    <button
+                      type="button"
+                      onClick={() => setExemptions(exemptions.filter((_, i) => i !== index))}
+                      className="text-[11px] font-medium text-ink-400 transition hover:text-red-600"
+                    >
+                      Remove exemption
+                    </button>
+                  </div>
+                </div>
+              ))}
+              {exemptions.length === 0 ? (
+                <p className="rounded-lg border border-dashed border-ink-200 px-4 py-6 text-center text-[13px] text-ink-400">
+                  No exemptions. Every rule applies to every submission.
                 </p>
               ) : null}
             </div>

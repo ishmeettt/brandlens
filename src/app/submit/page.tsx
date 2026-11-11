@@ -16,6 +16,13 @@ import {
   inputClass,
 } from "../../components/ui";
 import { demoBrandKit } from "../../lib/demo";
+import {
+  extractDocx,
+  extractPdf,
+  serialiseDocuments,
+  stripAnchors,
+  type ExtractedDocument,
+} from "../../lib/document-extract";
 import { extractTextFromImage } from "../../lib/review-pipeline";
 import {
   brandKitPassages,
@@ -34,6 +41,18 @@ const TYPES: Array<{ value: ContentType; label: string; hint: string }> = [
 
 type OcrState = "idle" | "reading" | "ready" | "error";
 
+interface DocumentEntry {
+  key: string;
+  file: File;
+  name: string;
+  kind: ExtractedDocument["kind"];
+  anchors: number;
+  anchorLabel: string;
+  charCount: number;
+  truncated: boolean;
+  document: ExtractedDocument;
+}
+
 export default function SubmitPage() {
   const demo = !isSupabaseConfigured;
 
@@ -44,6 +63,9 @@ export default function SubmitPage() {
   const [previewUrl, setPreviewUrl] = React.useState<string | null>(null);
   const [ocrState, setOcrState] = React.useState<OcrState>("idle");
   const [ocrError, setOcrError] = React.useState<string | null>(null);
+  const [documents, setDocuments] = React.useState<DocumentEntry[]>([]);
+  const [docReading, setDocReading] = React.useState(false);
+  const [docError, setDocError] = React.useState<string | null>(null);
   const [brandKit, setBrandKit] = React.useState<BrandKit | null>(demo ? demoBrandKit : null);
   const [kitLoading, setKitLoading] = React.useState(!demo);
   const [submitting, setSubmitting] = React.useState(false);
@@ -106,20 +128,119 @@ export default function SubmitPage() {
     }
   }
 
+  /**
+   * Parse one document server-side first, then in the browser if the route is
+   * unavailable (static demo, or a runtime without the parser). Either way the
+   * returned text is anchored page by page.
+   */
+  async function extractDocument(nextFile: File): Promise<ExtractedDocument> {
+    const isPdf =
+      nextFile.type === "application/pdf" || nextFile.name.toLowerCase().endsWith(".pdf");
+
+    try {
+      const body = new FormData();
+      body.append("file", nextFile);
+      const response = await fetch("/api/extract", { method: "POST", body });
+      if (response.ok) {
+        const payload = (await response.json()) as { document?: ExtractedDocument };
+        if (payload?.document?.segments?.length) return payload.document;
+      }
+    } catch {
+      // Fall through to the in-browser parser.
+    }
+
+    return isPdf ? await extractPdf(nextFile) : await extractDocx(nextFile);
+  }
+
+  async function addDocuments(files: File[]) {
+    const accepted = files.filter((file) => /\.(pdf|docx)$/i.test(file.name));
+    if (accepted.length === 0) {
+      setDocError("Choose PDF or Word files.");
+      return;
+    }
+
+    setDocReading(true);
+    setDocError(null);
+    try {
+      const additions: DocumentEntry[] = [];
+      for (const nextFile of accepted) {
+        if (
+          documents.some(
+            (entry) => entry.name === nextFile.name && entry.file.size === nextFile.size
+          )
+        ) {
+          continue;
+        }
+        try {
+          const document = await extractDocument(nextFile);
+          if (document.segments.length === 0) {
+            setDocError(
+              nextFile.name.toLowerCase().endsWith(".pdf")
+                ? `“${nextFile.name}” has no selectable text — it is probably a scan. Submit it as an image so OCR can read it, or paste its text under Copy.`
+                : `No readable paragraphs were found in “${nextFile.name}”.`
+            );
+            continue;
+          }
+          additions.push({
+            key: `${nextFile.name}-${nextFile.size}-${nextFile.lastModified}`,
+            file: nextFile,
+            name: nextFile.name,
+            kind: document.kind,
+            anchors: document.pageCount,
+            anchorLabel: document.kind === "pdf" ? "pages" : "paragraphs",
+            charCount: document.charCount,
+            truncated: document.truncated,
+            document,
+          });
+        } catch (err) {
+          setDocError(
+            err instanceof Error
+              ? `Could not read “${nextFile.name}”: ${err.message}`
+              : `Could not read “${nextFile.name}”.`
+          );
+        }
+      }
+
+      if (additions.length > 0) {
+        const next = [...documents, ...additions];
+        setDocuments(next);
+        setText(
+          serialiseDocuments(next.map((entry) => ({ name: entry.name, document: entry.document })))
+        );
+      }
+    } finally {
+      setDocReading(false);
+    }
+  }
+
+  function removeDocument(key: string) {
+    const next = documents.filter((entry) => entry.key !== key);
+    setDocuments(next);
+    setText(
+      next.length > 0
+        ? serialiseDocuments(next.map((entry) => ({ name: entry.name, document: entry.document })))
+        : ""
+    );
+  }
+
   async function handleFile(nextFile: File) {
     setFile(nextFile);
     setText("");
     setOcrState("idle");
+    setDocError(null);
     setError(null);
     if (contentType === "image") await runOcr(nextFile);
+    else await addDocuments([nextFile]);
   }
 
   function resetForType(next: ContentType) {
     setContentType(next);
     setFile(null);
+    setDocuments([]);
     setText("");
     setOcrState("idle");
     setOcrError(null);
+    setDocError(null);
     setError(null);
   }
 
@@ -132,7 +253,12 @@ export default function SubmitPage() {
       setError("Give this submission a title so reviewers can find it.");
       return;
     }
-    if (!text.trim() && contentType !== "image") {
+    const isDocument = contentType === "pdf" || contentType === "docx";
+    if (isDocument && documents.length === 0) {
+      setError("Add at least one PDF or Word document to review.");
+      return;
+    }
+    if (!isDocument && !text.trim() && contentType !== "image") {
       setError("Add the content that should be reviewed.");
       return;
     }
@@ -153,25 +279,38 @@ export default function SubmitPage() {
 
       let imageUrl: string | null = null;
       let pdfUrl: string | null = null;
+      const bucket = "content-submissions";
 
-      if (file) {
-        const bucket = "content-submissions";
-        const path = `${auth.user.id}/${Date.now()}_${file.name.replace(/\s+/g, "-")}`;
-        const { error: uploadError } = await supabase.storage.from(bucket).upload(path, file, {
+      const uploads: File[] = isDocument
+        ? documents.map((entry) => entry.file)
+        : file
+          ? [file]
+          : [];
+
+      for (const upload of uploads) {
+        const path = `${auth.user.id}/${Date.now()}_${upload.name.replace(/\s+/g, "-")}`;
+        const { error: uploadError } = await supabase.storage.from(bucket).upload(path, upload, {
           upsert: false,
         });
         if (uploadError) throw uploadError;
         const { data } = supabase.storage.from(bucket).getPublicUrl(path);
         if (contentType === "image") imageUrl = data.publicUrl;
-        else pdfUrl = data.publicUrl;
+        else if (!pdfUrl) pdfUrl = data.publicUrl;
       }
+
+      // A set is labelled by the format it contains, so the queue can show it.
+      const submitType: ContentType = isDocument
+        ? documents.some((entry) => entry.kind === "pdf")
+          ? "pdf"
+          : "docx"
+        : contentType;
 
       const { data, error: insertError } = await supabase
         .from("content_submissions")
         .insert({
           brand_kit_id: brandKit?.id ?? null,
           title: trimmedTitle,
-          content_type: contentType,
+          content_type: submitType,
           status: "submitted",
           text_content: text.trim() || null,
           image_url: imageUrl,
@@ -194,8 +333,10 @@ export default function SubmitPage() {
     setTitle("");
     setText("");
     setFile(null);
+    setDocuments([]);
     setOcrState("idle");
     setOcrError(null);
+    setDocError(null);
     setError(null);
   }
 
@@ -203,7 +344,9 @@ export default function SubmitPage() {
   const facts = normaliseFacts(brandKit?.facts);
   const palette = normalisePalette(brandKit?.palette);
   const passages = brandKitPassages(brandKit);
-  const words = text.trim() ? text.trim().split(/\s+/).length : 0;
+  const plainText = contentType === "pdf" || contentType === "docx" ? stripAnchors(text) : text;
+  const words = plainText.trim() ? plainText.trim().split(/\s+/).length : 0;
+  const documentPages = documents.reduce((sum, entry) => sum + entry.anchors, 0);
 
   if (created) {
     return (
@@ -274,7 +417,10 @@ export default function SubmitPage() {
       <div className="mt-6 grid gap-6 lg:grid-cols-[minmax(0,1fr)_320px]">
         <form onSubmit={handleSubmit} className="space-y-6">
           <Card>
-            <CardHeader title="What are you submitting?" description="Choose the format; images are read locally with OCR." />
+            <CardHeader
+              title="What are you submitting?"
+              description="        Choose the format; images are read with OCR and documents are parsed into page-anchored text before review — on the server, with a browser fallback."
+            />
             <div className="p-5">
               <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
                 {TYPES.map((type) => {
@@ -311,26 +457,18 @@ export default function SubmitPage() {
                   />
                 </Field>
 
-                {contentType !== "image" ? (
+                {contentType === "text" ? (
                   <Field
-                    label={contentType === "text" ? "Content" : "Document text"}
+                    label="Content"
                     htmlFor="content"
-                    hint={
-                      contentType === "text"
-                        ? `${words} words · checked for terminology, claims, alt text and colour`
-                        : "Paste the document text — the review engine reads text, not the file itself."
-                    }
+                    hint={`${words} words · checked for terminology, claims, alt text and colour`}
                   >
                     <textarea
                       id="content"
                       rows={12}
                       value={text}
                       onChange={(event) => setText(event.target.value)}
-                      placeholder={
-                        contentType === "text"
-                          ? "Paste the copy that should go through brand review…"
-                          : "Paste the text of the PDF or DOCX so it can be reviewed…"
-                      }
+                      placeholder="Paste the copy that should go through brand review…"
                       className={cn(inputClass(), "resize-y font-normal leading-relaxed")}
                     />
                   </Field>
@@ -339,7 +477,7 @@ export default function SubmitPage() {
                 {contentType !== "text" ? (
                   <div>
                     <p className="field-label">
-                      {contentType === "image" ? "Image file" : `${contentType.toUpperCase()} file`}
+                      {contentType === "image" ? "Image file" : "Documents"}
                     </p>
                     <div
                       onDragOver={(event) => {
@@ -350,8 +488,9 @@ export default function SubmitPage() {
                       onDrop={async (event) => {
                         event.preventDefault();
                         setDragging(false);
-                        const dropped = event.dataTransfer.files?.[0];
-                        if (dropped) await handleFile(dropped);
+                        const dropped = Array.from(event.dataTransfer.files ?? []);
+                        if (dropped.length === 1) await handleFile(dropped[0]);
+                        else if (dropped.length > 1) await addDocuments(dropped);
                       }}
                       onClick={() => fileInputRef.current?.click()}
                       role="button"
@@ -371,23 +510,112 @@ export default function SubmitPage() {
                         <path d="M4 15v3a2 2 0 002 2h12a2 2 0 002-2v-3" />
                       </svg>
                       <p className="text-[13px] font-medium text-ink-700">
-                        {file ? file.name : "Drop a file or click to browse"}
+                        {contentType === "image"
+                          ? file?.name ?? "Drop a file or click to browse"
+                          : documents.length > 0
+                            ? "Add another document"
+                            : "Drop files or click to browse"}
                       </p>
                       <p className="text-[11px] text-ink-400">
-                        {contentType === "image" ? "PNG, JPG or WebP" : "PDF or DOCX"}
+                        {contentType === "image"
+                          ? "PNG, JPG or WebP"
+                          : "PDF or DOCX · a deck, a launch doc, the whole set"}
                       </p>
                       <input
                         ref={fileInputRef}
                         type="file"
                         className="sr-only"
+                        multiple={contentType !== "image"}
                         accept={contentType === "image" ? "image/*" : ".pdf,.docx"}
                         onChange={async (event) => {
-                          const selected = event.target.files?.[0];
-                          if (selected) await handleFile(selected);
+                          const selected = Array.from(event.target.files ?? []);
+                          event.target.value = "";
+                          if (selected.length === 1 && contentType === "image") await handleFile(selected[0]);
+                          else if (selected.length > 0) await addDocuments(selected);
                         }}
                       />
                     </div>
                   </div>
+                ) : null}
+
+                {contentType === "pdf" || contentType === "docx" ? (
+                  <>
+                    {docReading ? (
+                      <div className="flex items-center gap-2 rounded-xl border border-ink-100 bg-ink-50/60 px-4 py-3 text-[12px] text-ink-500">
+                        <Spinner className="h-3.5 w-3.5" />
+                        Reading {documents.length > 0 ? "the next document" : "the document"} — text
+                        is anchored before it reaches the review.
+                      </div>
+                    ) : null}
+
+                    {documents.length > 0 ? (
+                      <div className="overflow-hidden rounded-xl border border-ink-100">
+                        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-ink-100 px-4 py-3">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <Badge tone="success">
+                              {documents.length === 1 ? "Text extracted" : `${documents.length} documents`}
+                            </Badge>
+                            <span className="text-[12px] text-ink-500">
+                              {documentPages} {documents.every((entry) => entry.kind === "pdf") ? "pages" : "anchors"}{" "}
+                              · {words} words · {stripAnchors(text).length.toLocaleString()} characters
+                            </span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => fileInputRef.current?.click()}
+                            className="text-[11px] font-medium text-brand-600 hover:text-brand-700"
+                          >
+                            Add documents
+                          </button>
+                        </div>
+
+                        <ul className="divide-y divide-ink-50">
+                          {documents.map((entry) => (
+                            <li
+                              key={entry.key}
+                              className="flex items-center justify-between gap-3 bg-white px-4 py-2.5"
+                            >
+                              <div className="min-w-0">
+                                <p className="truncate text-[12px] font-medium text-ink-700">{entry.name}</p>
+                                <p className="text-[11px] text-ink-400">
+                                  {entry.kind.toUpperCase()} · {entry.anchors} {entry.anchorLabel} ·{" "}
+                                  {entry.charCount.toLocaleString()} characters
+                                  {entry.truncated ? " · opening pages only" : ""}
+                                </p>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => removeDocument(entry.key)}
+                                className="shrink-0 text-[11px] font-medium text-ink-400 transition hover:text-red-600"
+                              >
+                                Remove
+                              </button>
+                            </li>
+                          ))}
+                        </ul>
+
+                        <div className="max-h-48 overflow-y-auto bg-ink-50/40 px-4 py-3">
+                          <pre className="whitespace-pre-wrap font-sans text-[12px] leading-relaxed text-ink-600">
+                            {plainText.slice(0, 1200)}
+                            {plainText.length > 1200 ? "\u2026" : ""}
+                          </pre>
+                        </div>
+                        <p className="border-t border-ink-100 px-4 py-2 text-[11px] text-ink-400">
+                          {documents.length === 1
+                            ? "Every page is reviewed, and each finding carries the page it came from."
+                            : "All documents are reviewed as one set with a combined verdict. Each finding carries the document and page it came from."}
+                        </p>
+                      </div>
+                    ) : null}
+
+                    {docError ? (
+                      <div className="mt-3">
+                        <Alert tone="warning" title="Could not extract text">
+                          {docError} You can paste the copy under <strong>Copy</strong> instead.
+                        </Alert>
+                      </div>
+                    ) : null}
+                  </>
                 ) : null}
 
                 {contentType === "image" && previewUrl ? (

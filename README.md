@@ -48,12 +48,55 @@ workspace, connect Supabase:
 The AI judgement pass is optional. Without `AI_API_KEY` (or `GROQ_API_KEY`) the
 review runs deterministic rules only and the UI says so.
 
+## Documents
+
+PDF and DOCX submissions are parsed on the server (`POST /api/extract`) with a
+browser fallback, and stored with a page marker for every page (`[[p.4]]`) or
+paragraph (`[[¶ 12 · Pricing]]`), so a finding can point at the page it came
+from. Several files can be submitted as one set: markers become
+`[[Autumn deck · p.4]]` and the queue reviews the set as one submission with a
+combined verdict.
+
+## Governance
+
+- **Policy clock** — every open submission has a target derived from its worst
+  finding (critical 1d, high 3d, medium 5d, low 7d). A stored `due_at` wins.
+- **Exemptions** — scoped, owned and expiring, stored in
+  `brand_kits.guidelines.exemptions`, edited on the brand-kit page. The engine
+  suppresses matching findings, the review names what it excused, and the audit
+  record keeps the decision after it lapses.
+- **Audit record** — `/audit?submission=…` is a printable record (Print → PDF)
+  plus JSON with a SHA-256 digest, engine reconciliation, anchors and exemptions.
+- **Decision log** — `/audit/log` chains every decision with the hash of the one
+  before it and verifies the chain in the browser.
+- **Per-rule precision** — the Admin dashboard maps decisions back to exact
+  rules and reports precision and false-positive rate, with a thin-sample
+  marker and a separate "unattributed" bucket.
+
+Migration `supabase/migrations/20240101000004_governance_ops.sql` adds owner and
+due-date columns, rule/reviewer attribution on findings, and an append-only
+`audit_events` table. Apply it in the Supabase SQL editor; the app works without
+it and uses the new columns as soon as they exist.
+
+## Verification
+
+```bash
+npm run eval:rules        # replay the rule engine against the labelled corpus
+npm run test:governance   # clock, per-rule precision, exemptions, audit pack, chain
+npm run verify:supabase   # schema and policy checks (no DDL)
+```
+
+Add a labelled document to `evals/corpus.json` before changing a rule's
+behaviour — it exits non-zero on any miss or unexpected finding.
+
 ## Development
 
 ```bash
 npm install
 npm run dev               # http://localhost:3000
 npm run verify:supabase   # 16 checks against the real RLS policies
+npm run eval:rules        # replay the rule engine against the labelled corpus
+npm run test:governance   # 43 governance checks
 npm run seed:demo         # (re)build the judge demo workspace
 ```
 

@@ -139,3 +139,36 @@
 .scrollbar-slim::-webkit-scrollbar-track {
   background: transparent;
 }
+
+/* Audit record printing: hide the app chrome, keep only the record sheet. */
+@media print {
+  body * {
+    visibility: hidden;
+  }
+
+  .audit-sheet,
+  .audit-sheet * {
+    visibility: visible;
+  }
+
+  .audit-sheet {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+  }
+
+  .audit-sheet .card {
+    border-color: #d9dce6;
+    box-shadow: none;
+    break-inside: avoid;
+  }
+
+  .no-print {
+    display: none !important;
+  }
+
+  @page {
+    margin: 14mm;
+  }
+}
