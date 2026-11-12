@@ -3,3 +3,8 @@
 declare module "pdfjs-dist/legacy/build/pdf.mjs" {
   export * from "pdfjs-dist";
 }
+
+// Imported for its side effect: it registers pdf.js's in-process worker handler
+// on `globalThis.pdfjsWorker`, which is how the parser runs without spawning or
+// fetching a worker module.
+declare module "pdfjs-dist/legacy/build/pdf.worker.mjs";

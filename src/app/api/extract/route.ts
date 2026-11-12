@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import {
   configurePdfModule,
-  configurePdfWorker,
   extractDocx,
   extractPdf,
   serialiseDocument,
@@ -15,42 +14,35 @@ import {
  * anchored document the browser parser produces, so a finding always cites the
  * page it came from regardless of where the bytes were read.
  *
- * `runtime = "nodejs"` because pdf.js needs a real filesystem and worker
- * module. Where the host cannot provide those (a Workers-only deployment), the
- * form falls back to the in-browser parser and the user sees no difference.
+ * pdf.js normally runs its parsing in a worker loaded from a URL. A Worker
+ * runtime has neither a filesystem nor a spare thread for that, so the worker
+ * module is bundled and imported in-process instead: it registers
+ * `globalThis.pdfjsWorker`, which pdf.js prefers over any worker source. This
+ * keeps the server parse working on both Node and Cloudflare Workers, so the
+ * form gets anchored text from the server on either host.
  */
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const MAX_BYTES = 25 * 1024 * 1024;
 
-async function workerSource(): Promise<string | null> {
-  try {
-    const [{ pathToFileURL }, path] = await Promise.all([
-      import("node:url"),
-      import("node:path"),
-    ]);
-    const candidate = path.join(
-      process.cwd(),
-      "node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs"
-    );
-    return pathToFileURL(candidate).href;
-  } catch {
-    return null;
-  }
+let pdfReady: Promise<typeof import("pdfjs-dist")> | null = null;
+
+/** Load pdf.js and its worker handler once per isolate. */
+function loadPdf(): Promise<typeof import("pdfjs-dist")> {
+  pdfReady ??= (async () => {
+    const pdfjs = (await import(
+      "pdfjs-dist/legacy/build/pdf.mjs"
+    )) as unknown as typeof import("pdfjs-dist");
+    await import("pdfjs-dist/legacy/build/pdf.worker.mjs");
+    configurePdfModule(pdfjs);
+    return pdfjs;
+  })();
+  return pdfReady;
 }
 
 export async function POST(request: Request) {
   try {
-    // A Workers-only host has no Node runtime for pdf.js; the form falls back
-    // to the in-browser parser when this answers 503.
-    if (typeof process === "undefined" || !process.versions?.node) {
-      return NextResponse.json(
-        { error: "This host cannot parse documents on the server." },
-        { status: 503 }
-      );
-    }
-
     const form = await request.formData();
     const file = form.get("file");
 
@@ -73,10 +65,7 @@ export async function POST(request: Request) {
 
     let document: ExtractedDocument;
     if (isPdf) {
-      const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
-      configurePdfModule(pdfjs as unknown as typeof import("pdfjs-dist"));
-      const worker = await workerSource();
-      if (worker) configurePdfWorker(worker);
+      await loadPdf();
       document = await extractPdf(file);
     } else {
       document = await extractDocx(file);

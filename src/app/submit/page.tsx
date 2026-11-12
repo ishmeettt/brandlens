@@ -52,6 +52,8 @@ interface DocumentEntry {
   charCount: number;
   truncated: boolean;
   document: ExtractedDocument;
+  /** Where the text was read, so the form can say which parser ran. */
+  parsedIn: "server" | "browser";
 }
 
 export default function SubmitPage() {
@@ -150,7 +152,9 @@ export default function SubmitPage() {
    * unavailable (static demo, or a runtime without the parser). Either way the
    * returned text is anchored page by page.
    */
-  async function extractDocument(nextFile: File): Promise<ExtractedDocument> {
+  async function extractDocument(
+    nextFile: File
+  ): Promise<{ document: ExtractedDocument; parsedIn: "server" | "browser" }> {
     const isPdf =
       nextFile.type === "application/pdf" || nextFile.name.toLowerCase().endsWith(".pdf");
 
@@ -159,14 +163,23 @@ export default function SubmitPage() {
       body.append("file", nextFile);
       const response = await fetch("/api/extract", { method: "POST", body });
       if (response.ok) {
-        const payload = (await response.json()) as { document?: ExtractedDocument };
-        if (payload?.document?.segments?.length) return payload.document;
+        const payload = (await response.json()) as {
+          document?: ExtractedDocument;
+          parsed?: string;
+        };
+        if (payload?.document?.segments?.length) {
+          return {
+            document: payload.document,
+            parsedIn: payload.parsed === "server" ? "server" : "browser",
+          };
+        }
       }
     } catch {
       // Fall through to the in-browser parser.
     }
 
-    return isPdf ? await extractPdf(nextFile) : await extractDocx(nextFile);
+    const document = isPdf ? await extractPdf(nextFile) : await extractDocx(nextFile);
+    return { document, parsedIn: "browser" };
   }
 
   async function addDocuments(files: File[]) {
@@ -190,12 +203,13 @@ export default function SubmitPage() {
         }
         try {
           const isPdf = nextFile.name.toLowerCase().endsWith(".pdf");
-          let document = await extractDocument(nextFile);
+          let { document, parsedIn } = await extractDocument(nextFile);
           if (document.segments.length === 0 && isPdf) {
             // A scan has no text layer — nothing to extract. Render each page
             // and read it locally instead of sending the reviewer away.
             setScanning(nextFile.name);
             document = await extractScannedPdf(nextFile);
+            parsedIn = "browser";
           }
           if (document.segments.length === 0) {
             setDocError(
@@ -215,6 +229,7 @@ export default function SubmitPage() {
             charCount: document.charCount,
             truncated: document.truncated,
             document,
+            parsedIn,
           });
         } catch (err) {
           setDocError(
@@ -602,6 +617,10 @@ export default function SubmitPage() {
                             <span className="text-[12px] text-ink-500">
                               {documentPages} {documents.every((entry) => entry.kind === "pdf") ? "pages" : "anchors"}{" "}
                               · {words} words · {stripAnchors(text).length.toLocaleString()} characters
+                              {" · "}
+                              {documents.every((entry) => entry.parsedIn === "server")
+                                ? "parsed on the server"
+                                : "parsed in your browser"}
                             </span>
                           </div>
                           <button
