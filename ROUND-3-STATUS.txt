@@ -39,10 +39,12 @@ Verified
     locators `Autumn deck · p.4`.
 
 Not done
-  - Scanned PDFs with no text layer still ask the reviewer to resubmit as an
-    image (OCR path exists for images; automatic PDF → OCR routing does not).
-  - DOCX is covered by unit checks but has never been run against a real Word
-    file supplied by a user.
+  - DOCX extraction is covered by unit checks but has never been run against a
+    real Word file supplied by a user.
+
+Scanned PDFs now route to OCR: a PDF with no text layer is rendered page by
+page to a canvas and read locally (verified with an image-only PDF: 1 page,
+15 words, 110 characters, text recognised verbatim).
 
 
 2. GOVERNANCE OPERATIONS — COMPLETE EXCEPT SAVED OWNERS
@@ -87,10 +89,10 @@ Not done / blocked
       * findings carry no stored `rule_id` (precision is recovered by re-running
         the engine instead),
       * the `audit_events` table exists only after the migration.
-  - `audit_events` is created by migration 0004 but the app does not write to it
-    yet. The feed is a verifiable chain derived from stored findings; true
-    append-only storage is a follow-up change.
-  - No "mine / overdue" queue filter (nice-to-have, not a stated promise).
+  - Decisions are written to `audit_events` and the decision log reads it when
+    it has rows. The table only exists after the migration, so until then the
+    page falls back to the derived chain and a decision shows a one-time notice.
+    The stored path has not been run against a migrated database.
 
 
 3. TRUST AND MEASUREMENT — COMPLETE EXCEPT SSO
@@ -161,13 +163,11 @@ Required
      exposed and is no longer needed.
 
 Optional / future work
-  3. Scanned PDF → OCR routing (render page to canvas, then reuse the OCR path).
+  3. Apply migration 0004, then confirm decisions land in `audit_events` and the
+     feed renders from the table instead of the derived chain.
   4. Try a real .docx end to end and keep one in the corpus.
-  5. Write every decision into `audit_events` after migration 0004, making the
-     feed append-only at storage level rather than derived.
-  6. SSO/SAML once a Supabase plan and IdP are available.
-  7. Add a "mine / overdue" filter to the review queue.
-  8. Remove the two 60 KB test PDFs left in the `content-submissions` storage
+  5. SSO/SAML once a Supabase plan and IdP are available.
+  6. Remove the two 60 KB test PDFs left in the `content-submissions` storage
      bucket by deleted test submissions.
 
 

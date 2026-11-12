@@ -126,7 +126,14 @@ export default function AdminDashboard() {
   }, []);
 
   React.useEffect(() => {
-    void loadData();
+    let active = true;
+    (async () => {
+      if (!active) return;
+      await loadData();
+    })();
+    return () => {
+      active = false;
+    };
   }, [loadData]);
 
   /**

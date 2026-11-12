@@ -462,8 +462,6 @@ function computeRules(content: string, kit?: BrandKit | null): RuleFinding[] {
   const glossary = normaliseGlossary(kit.glossary);
   const facts = normaliseFacts(kit.facts);
   const palette = normalisePalette(kit.palette);
-  const guidelines = normaliseGuidelines(kit.guidelines);
-  const guidelineText = guidelines.map((g) => g.text.toLowerCase()).join(" ");
 
   const guidelinePassage = (matcher: RegExp) =>
     passages.find((p) => p.source === "Guidelines" && matcher.test(p.text.toLowerCase()));
@@ -628,7 +626,14 @@ function computeRules(content: string, kit?: BrandKit | null): RuleFinding[] {
   }
 
   /* --- Colour & contrast ------------------------------------------- */
-  const hexes = [...new Set((text.match(/#[0-9a-f]{3,6}\b/gi) ?? []).map((h) => h.toUpperCase()))];
+  // Only a complete 3- or 6-digit value is a colour. `{3,6}` also matched the
+  // first five characters of a six-digit hex when the sixth was followed by a
+  // word character, and reported half a colour nobody could act on.
+  const hexes = [
+    ...new Set(
+      (text.match(/#(?:[0-9a-f]{6}|[0-9a-f]{3})\b/gi) ?? []).map((h) => h.toUpperCase())
+    ),
+  ];
   if (hexes.length > 0 && palette.length > 0) {
     const palettePassage = passages.find((p) => p.source === "Palette");
     const allowed = new Set(palette.map((c) => c.hex.toUpperCase()));

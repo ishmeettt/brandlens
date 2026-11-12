@@ -19,6 +19,7 @@ import { demoBrandKit } from "../../lib/demo";
 import {
   extractDocx,
   extractPdf,
+  extractScannedPdf,
   serialiseDocuments,
   stripAnchors,
   type ExtractedDocument,
@@ -65,6 +66,8 @@ export default function SubmitPage() {
   const [ocrError, setOcrError] = React.useState<string | null>(null);
   const [documents, setDocuments] = React.useState<DocumentEntry[]>([]);
   const [docReading, setDocReading] = React.useState(false);
+  // Name of the scan currently being OCR'd, so the wait is explained.
+  const [scanning, setScanning] = React.useState<string | null>(null);
   const [docError, setDocError] = React.useState<string | null>(null);
   const [brandKit, setBrandKit] = React.useState<BrandKit | null>(demo ? demoBrandKit : null);
   const [kitLoading, setKitLoading] = React.useState(!demo);
@@ -73,6 +76,7 @@ export default function SubmitPage() {
   const [created, setCreated] = React.useState<{ id: string } | null>(null);
   const [dragging, setDragging] = React.useState(false);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
+  const previewRef = React.useRef<string | null>(null);
 
   React.useEffect(() => {
     if (!supabase) return;
@@ -100,15 +104,28 @@ export default function SubmitPage() {
     };
   }, []);
 
-  React.useEffect(() => {
-    if (!file || contentType !== "image") {
-      setPreviewUrl(null);
-      return;
+  /**
+   * The object URL is created and revoked by the selection that owns it, which
+   * keeps it out of an effect: it used to be created in an effect that also
+   * cleared state, so picking a file cost an extra render and a stale URL could
+   * survive a type switch.
+   */
+  function setPreview(next: File | null) {
+    if (previewRef.current) {
+      URL.revokeObjectURL(previewRef.current);
+      previewRef.current = null;
     }
-    const url = URL.createObjectURL(file);
+    const url = next ? URL.createObjectURL(next) : null;
+    previewRef.current = url;
     setPreviewUrl(url);
-    return () => URL.revokeObjectURL(url);
-  }, [file, contentType]);
+  }
+
+  React.useEffect(
+    () => () => {
+      if (previewRef.current) URL.revokeObjectURL(previewRef.current);
+    },
+    []
+  );
 
   async function runOcr(nextFile: File) {
     setOcrState("reading");
@@ -172,11 +189,18 @@ export default function SubmitPage() {
           continue;
         }
         try {
-          const document = await extractDocument(nextFile);
+          const isPdf = nextFile.name.toLowerCase().endsWith(".pdf");
+          let document = await extractDocument(nextFile);
+          if (document.segments.length === 0 && isPdf) {
+            // A scan has no text layer — nothing to extract. Render each page
+            // and read it locally instead of sending the reviewer away.
+            setScanning(nextFile.name);
+            document = await extractScannedPdf(nextFile);
+          }
           if (document.segments.length === 0) {
             setDocError(
-              nextFile.name.toLowerCase().endsWith(".pdf")
-                ? `“${nextFile.name}” has no selectable text — it is probably a scan. Submit it as an image so OCR can read it, or paste its text under Copy.`
+              isPdf
+                ? `“${nextFile.name}” has no readable text — OCR found nothing on its pages either. Paste its text under Copy instead.`
                 : `No readable paragraphs were found in “${nextFile.name}”.`
             );
             continue;
@@ -209,6 +233,7 @@ export default function SubmitPage() {
         );
       }
     } finally {
+      setScanning(null);
       setDocReading(false);
     }
   }
@@ -229,13 +254,18 @@ export default function SubmitPage() {
     setOcrState("idle");
     setDocError(null);
     setError(null);
-    if (contentType === "image") await runOcr(nextFile);
-    else await addDocuments([nextFile]);
+    if (contentType === "image") {
+      setPreview(nextFile);
+      await runOcr(nextFile);
+    } else {
+      await addDocuments([nextFile]);
+    }
   }
 
   function resetForType(next: ContentType) {
     setContentType(next);
     setFile(null);
+    setPreview(null);
     setDocuments([]);
     setText("");
     setOcrState("idle");
@@ -333,6 +363,7 @@ export default function SubmitPage() {
     setTitle("");
     setText("");
     setFile(null);
+    setPreview(null);
     setDocuments([]);
     setOcrState("idle");
     setOcrError(null);
@@ -489,8 +520,11 @@ export default function SubmitPage() {
                         event.preventDefault();
                         setDragging(false);
                         const dropped = Array.from(event.dataTransfer.files ?? []);
-                        if (dropped.length === 1) await handleFile(dropped[0]);
-                        else if (dropped.length > 1) await addDocuments(dropped);
+                        if (dropped.length === 0) return;
+                        // An image submission is one image; extra files in a
+                        // document submission are one set.
+                        if (contentType === "image") await handleFile(dropped[0]);
+                        else await addDocuments(dropped);
                       }}
                       onClick={() => fileInputRef.current?.click()}
                       role="button"
@@ -530,8 +564,9 @@ export default function SubmitPage() {
                         onChange={async (event) => {
                           const selected = Array.from(event.target.files ?? []);
                           event.target.value = "";
-                          if (selected.length === 1 && contentType === "image") await handleFile(selected[0]);
-                          else if (selected.length > 0) await addDocuments(selected);
+                          if (selected.length === 0) return;
+                          if (contentType === "image") await handleFile(selected[0]);
+                          else await addDocuments(selected);
                         }}
                       />
                     </div>
@@ -543,8 +578,17 @@ export default function SubmitPage() {
                     {docReading ? (
                       <div className="flex items-center gap-2 rounded-xl border border-ink-100 bg-ink-50/60 px-4 py-3 text-[12px] text-ink-500">
                         <Spinner className="h-3.5 w-3.5" />
-                        Reading {documents.length > 0 ? "the next document" : "the document"} — text
-                        is anchored before it reaches the review.
+                        {scanning ? (
+                          <>
+                            “{scanning}” has no text layer — reading it with OCR, page by page, in
+                            your browser. Nothing is uploaded.
+                          </>
+                        ) : (
+                          <>
+                            Reading {documents.length > 0 ? "the next document" : "the document"} — text
+                            is anchored before it reaches the review.
+                          </>
+                        )}
                       </div>
                     ) : null}
 

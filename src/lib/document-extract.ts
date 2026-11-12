@@ -29,10 +29,20 @@ export interface ExtractedDocument {
   truncated: boolean;
 }
 
-/** The document a set of anchors belongs to. */
+/**
+ * The document a set of anchors belongs to.
+ *
+ * Only a set anchor is prefixed with a document name. A single document's
+ * label can still contain a separator — a DOCX paragraph reads
+ * `¶ 12 · Pricing and packaging` — so an anchor prefix is never a document
+ * name. Treating it as one made the review list every paragraph of a Word file
+ * as a separate "document".
+ */
 export function documentNameFromLabel(label: string): string | null {
-  const separator = label.indexOf(" · ");
-  return separator > 0 ? label.slice(0, separator) : null;
+  const trimmed = label.trim();
+  if (/^(?:p\.\d+|¶\s*\d+)\b/.test(trimmed)) return null;
+  const separator = trimmed.indexOf(" · ");
+  return separator > 0 ? trimmed.slice(0, separator) : null;
 }
 
 /** Hard stops so one 300-page deck cannot freeze the tab. */
@@ -184,6 +194,74 @@ export async function extractPdf(file: File): Promise<ExtractedDocument> {
     pageCount: pdf.numPages,
     charCount,
     truncated,
+  };
+}
+
+/** How many scanned pages are read. OCR costs seconds per page. */
+export const MAX_OCR_PAGES = 6;
+
+/**
+ * A scan has no text layer, so each page is rendered to a canvas and read by
+ * OCR. Browser only: rendering needs a DOM, and the recognition models are
+ * megabytes the server route deliberately does not ship.
+ */
+export async function extractScannedPdf(
+  file: File,
+  onPage?: (page: number, total: number) => void
+): Promise<ExtractedDocument> {
+  if (typeof document === "undefined") {
+    throw new Error("Reading a scanned PDF needs a browser.");
+  }
+
+  const pdfjs: PdfModule = pdfModuleOverride ?? (await import("pdfjs-dist"));
+  pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerSrc;
+
+  const data = new Uint8Array(await file.arrayBuffer());
+  const pdf = await pdfjs.getDocument({ data, isEvalSupported: false }).promise;
+  const { recogniseImage } = await import("./ocr");
+
+  const segments: DocSegment[] = [];
+  let charCount = 0;
+  const pageLimit = Math.min(pdf.numPages, MAX_OCR_PAGES);
+
+  try {
+    for (let pageNumber = 1; pageNumber <= pageLimit; pageNumber += 1) {
+      const page = await pdf.getPage(pageNumber);
+      try {
+        // 2× keeps small print legible after rasterising without making each
+        // page slow to render.
+        const viewport = page.getViewport({ scale: 2 });
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.ceil(viewport.width);
+        canvas.height = Math.ceil(viewport.height);
+        const context = canvas.getContext("2d");
+        if (!context) throw new Error("This browser could not provide a canvas for OCR.");
+        // A scan can come with a transparent background; OCR needs contrast.
+        context.fillStyle = "#ffffff";
+        context.fillRect(0, 0, canvas.width, canvas.height);
+        await page.render({ canvasContext: context, viewport }).promise;
+
+        const text = await recogniseImage(canvas);
+        onPage?.(pageNumber, pageLimit);
+        if (text) {
+          segments.push({ label: `p.${pageNumber}`, text });
+          charCount += text.length;
+        }
+      } finally {
+        page.cleanup();
+      }
+      if (charCount > MAX_CHARS) break;
+    }
+  } finally {
+    await pdf.destroy();
+  }
+
+  return {
+    kind: "pdf",
+    segments,
+    pageCount: pdf.numPages,
+    charCount,
+    truncated: pdf.numPages > pageLimit,
   };
 }
 

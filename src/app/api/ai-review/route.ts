@@ -3,9 +3,21 @@ import { NextResponse } from "next/server";
 export const runtime = "nodejs";
 
 const apiKey =
-  process.env.AI_API_KEY ?? process.env.GROQ_API_KEY ?? process.env.OPENAI_API_KEY;
-const baseUrl = (process.env.AI_BASE_URL ?? "https://api.groq.com/openai/v1").replace(/\/$/, "");
-const model = process.env.AI_MODEL ?? "llama-3.3-70b-versatile";
+  process.env.AI_API_KEY ?? process.env.OPENAI_API_KEY ?? process.env.GROQ_API_KEY;
+// Which key is present decides the defaults. A Groq key is only valid against
+// Groq's endpoint and an OpenAI key only against OpenAI's, but the endpoint
+// used to default to Groq while `.env.example` documented an OpenAI key — so
+// following the docs produced a 401 that looked like an outage.
+const onlyGroqKey =
+  Boolean(process.env.GROQ_API_KEY) &&
+  !process.env.AI_API_KEY &&
+  !process.env.OPENAI_API_KEY;
+const baseUrl = (
+  process.env.AI_BASE_URL ??
+  (onlyGroqKey ? "https://api.groq.com/openai/v1" : "https://api.openai.com/v1")
+).replace(/\/$/, "");
+const model =
+  process.env.AI_MODEL ?? (onlyGroqKey ? "llama-3.3-70b-versatile" : "gpt-4o-mini");
 
 interface Passage {
   source: string;

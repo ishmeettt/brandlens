@@ -5,7 +5,7 @@ local and uncommitted until the owner says otherwise.
 
 | # | Improvement | State |
 | - | ------------- | ----- |
-| 1 | Ingest the content teams actually ship | Built except scanned-PDF OCR fallback |
+| 1 | Ingest the content teams actually ship | Built |
 | 2 | Governance operations | Built except assignment UI; stored audit events need migration 0004 |
 | 3 | Trust and measurement | Built except SSO/SAML (blocked on provider plan) |
 
@@ -58,7 +58,7 @@ the anchors and the locators are identical either way.
 | 1.3 | Submit form reads the file instead of asking for pasted text | Choosing PDF/DOCX extracts, shows pages/words/characters and a preview | Built |
 | 1.4 | Findings carry their anchor | Review shows `p.4` on each finding whose token can be located | Built |
 | 1.5 | Batch review: many documents, one verdict | A submission can hold several documents and the queue reviews them as one set | Built |
-| 1.6 | Scanned PDFs fall back to OCR | A PDF with no text layer routes to OCR instead of failing | Not built — asks the user to resubmit as an image |
+| 1.6 | Scanned PDFs fall back to OCR | A PDF with no text layer routes to OCR instead of failing | Built — pages are rasterised and read locally |
 | 1.7 | Server-side extraction for exports | The parser runs on the server, not only in the browser | Built — `/api/extract`, browser fallback |
 
 ### Verification
@@ -199,15 +199,14 @@ npm run verify:supabase   # 16 schema/policy checks (no DDL)
 
 ## Remaining, and why
 
-- **Scanned PDFs (1.6).** A PDF with no text layer still asks for an image
-  submission. Routing to OCR needs a page-render step (pdf.js canvas in the
-  browser); the OCR path itself already exists.
 - **Ownership assignment (2.1).** Owner and due-date controls are built on
   Admin and save through `content_submissions.owner_id` / `due_at`. They report
-  "needs migration 0004" until it is applied; a "mine/overdue" queue filter is
-  the remaining nicety.
-- **Stored append-only events (2.4/3.4).** The feed and verifier are built over
-  the rows the workspace already stores. Writing each decision into
-  `audit_events` (defined in 0004) is the next step after the migration.
+  "needs migration 0004" until it is applied, and the queue's "Mine" filter is
+  empty for the same reason.
+- **Stored append-only events (2.4/3.4).** Decisions are written to
+  `audit_events`, and the decision log reads that table when it has rows. Until
+  migration 0004 is applied the table is absent, so the page falls back to the
+  derived chain and a decision shows a one-time "needs 0004" notice. The stored
+  path is therefore unverified against a migrated database.
 - **SSO/SAML (3.5).** Supabase's SAML support is a paid-plan feature and needs
   an identity provider; nothing can be implemented or verified from here.

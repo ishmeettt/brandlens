@@ -90,8 +90,23 @@ create policy "Organizations can read their audit events"
     )
   );
 
+-- A reviewer records decisions for submissions they can already see, so the
+-- append must be allowed for them too — scoped to a real submission of the
+-- organization, never to an invented one.
 drop policy if exists "Members can append audit events" on public.audit_events;
 create policy "Members can append audit events"
   on public.audit_events
   for insert
-  with check (public.is_admin() or organization_id = auth.uid());
+  with check (
+    public.is_admin()
+    or organization_id = auth.uid()
+    or (
+      public.current_user_role() in ('reviewer', 'manager')
+      and exists (
+        select 1
+        from public.content_submissions s
+        join public.brand_kits k on k.id = s.brand_kit_id
+        where s.id = audit_events.submission_id
+      )
+    )
+  );

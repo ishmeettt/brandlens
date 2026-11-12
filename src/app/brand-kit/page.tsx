@@ -233,7 +233,6 @@ export default function BrandKitPage() {
     };
   }, []);
 
-  const guidelineCount = Object.values(guidelines).filter((value) => value.trim()).length;
   const validGlossary = glossary.filter((row) => row.term.trim()).length;
   const validFacts = facts.filter((row) => row.label.trim() && row.value.trim()).length;
   const validPalette = palette.filter((row) => /^#?[0-9a-f]{3,6}$/i.test(row.hex.trim())).length;
@@ -871,7 +870,7 @@ export default function BrandKitPage() {
           <div className="rounded-xl border border-ink-100 bg-ink-50/60 p-4 text-[12px] leading-relaxed text-ink-500">
             <span className="font-semibold text-ink-700">Tip:</span> keep clauses short and
             specific. A clause that names a term or a number produces precise findings; a
-            vague "be on brand" clause produces none.
+            vague “be on brand” clause produces none.
           </div>
         </aside>
       </form>

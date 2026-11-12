@@ -46,22 +46,17 @@ function AuditRecord() {
   const demo = !isSupabaseConfigured;
 
   const [pack, setPack] = React.useState<AuditPack | null>(null);
-  const [loading, setLoading] = React.useState(Boolean(id));
-  const [error, setError] = React.useState<string | null>(null);
+  // Loading and failure are derived from the reference in the URL rather than
+  // stored: a record that belongs to a different submission is not this page's
+  // answer, so it reads as still loading.
+  const [failure, setFailure] = React.useState<{ id: string; message: string } | null>(null);
   const [notice, setNotice] = React.useState<string | null>(null);
+  const loading = Boolean(id) && !failure && pack?.subject.id !== id;
+  const error = failure && failure.id === id ? failure.message : null;
 
   React.useEffect(() => {
     let active = true;
-
-    if (!id) {
-      setPack(null);
-      setLoading(false);
-      return;
-    }
-
-    setLoading(true);
-    setError(null);
-    setPack(null);
+    if (!id) return;
 
     (async () => {
       try {
@@ -105,10 +100,11 @@ function AuditRecord() {
 
         if (!submission) {
           if (active) {
-            setError(
-              "No submission matches that reference. Open the audit record from the review queue or the admin table."
-            );
-            setLoading(false);
+            setFailure({
+              id,
+              message:
+                "No submission matches that reference. Open the audit record from the review queue or the admin table.",
+            });
           }
           return;
         }
@@ -117,14 +113,14 @@ function AuditRecord() {
         const sealed = canSeal()
           ? await sealAuditPack(unsealed)
           : { ...unsealed, digest: "" };
-        if (active) {
-          setPack(sealed);
-          setLoading(false);
-        }
+        if (active) setPack(sealed);
       } catch (err) {
         if (active) {
-          setError(err instanceof Error ? err.message : "Could not build the audit record.");
-          setLoading(false);
+          setFailure({
+            id,
+            message:
+              err instanceof Error ? err.message : "Could not build the audit record.",
+          });
         }
       }
     })();

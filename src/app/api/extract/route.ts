@@ -99,6 +99,9 @@ export async function POST(request: Request) {
       parsed: "server",
     });
   } catch (error) {
+    // A file the parser cannot read is a problem with the upload, not with the
+    // server, so it answers 422. It used to answer 500, which read like an
+    // outage for what is a corrupt or mislabelled document.
     return NextResponse.json(
       {
         error:
@@ -106,7 +109,7 @@ export async function POST(request: Request) {
             ? `The server parser could not read that file: ${error.message}`
             : "The server parser could not read that file.",
       },
-      { status: 500 }
+      { status: 422 }
     );
   }
 }

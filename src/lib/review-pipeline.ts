@@ -109,14 +109,8 @@ export function extractTextContent(submission: ContentSubmission): string {
 
 /** Local OCR — runs in the browser, nothing is uploaded. */
 export async function extractTextFromImage(file: File): Promise<string> {
-  const { createWorker } = await import("tesseract.js");
-  const worker = await createWorker("eng");
-  try {
-    const { data } = await worker.recognize(file);
-    return (data.text ?? "").trim();
-  } finally {
-    await worker.terminate();
-  }
+  const { recogniseImage } = await import("./ocr");
+  return recogniseImage(file);
 }
 
 /* ------------------------------------------------------------------ */

@@ -16,7 +16,8 @@ import {
   StatusBadge,
   cn,
 } from "../../components/ui";
-import { demoBrandKit, demoSubmissions } from "../../lib/demo";
+import { appendAuditEvent, type AuditAction } from "../../lib/audit-events";
+import { buildDemoFindings, demoBrandKit, demoSubmissions } from "../../lib/demo";
 import {
   documentNameFromLabel,
   locatorForFinding,
@@ -25,6 +26,7 @@ import {
 } from "../../lib/document-extract";
 import { daysUntilExpiry, describeExemption } from "../../lib/exemptions";
 import { formatDate, formatDateTime } from "../../lib/format";
+import { getSlaRows, type SlaFindingRow } from "../../lib/governance-ops";
 import { runRuleSet } from "../../lib/rules";
 import {
   getFindingTypeLabel,
@@ -43,10 +45,12 @@ import {
   type UserRole,
 } from "../../lib/supabase";
 
-type Filter = "open" | "approved" | "all";
+type Filter = "open" | "mine" | "overdue" | "approved" | "all";
 
 const FILTERS: Array<{ value: Filter; label: string }> = [
   { value: "open", label: "Needs review" },
+  { value: "mine", label: "Mine" },
+  { value: "overdue", label: "Overdue" },
   { value: "approved", label: "Approved" },
   { value: "all", label: "All" },
 ];
@@ -96,6 +100,17 @@ export default function ReviewDashboard() {
   const [notice, setNotice] = React.useState<string | null>(null);
   const [filter, setFilter] = React.useState<Filter>("open");
   const [query, setQuery] = React.useState("");
+  const [userId, setUserId] = React.useState<string | null>(null);
+  // Worst severity per submission, so the queue can show whose review is late.
+  const [queueFindings, setQueueFindings] = React.useState<SlaFindingRow[]>(
+    demo
+      ? buildDemoFindings().map((finding) => ({
+          submission_id: finding.submission_id,
+          severity: finding.severity,
+        }))
+      : []
+  );
+  const [auditNotice, setAuditNotice] = React.useState<string | null>(null);
 
   const selected = submissions.find((item) => item.id === selectedId) ?? null;
 
@@ -117,6 +132,7 @@ export default function ReviewDashboard() {
 
         const resolvedRole = (profile?.role as UserRole | undefined) ?? "creator";
         if (!active) return;
+        setUserId(auth.user.id);
         setRole(resolvedRole);
         if (resolvedRole !== "reviewer" && resolvedRole !== "admin") {
           setLoading(false);
@@ -133,6 +149,14 @@ export default function ReviewDashboard() {
 
         const rows = (data ?? []) as ContentSubmission[];
         setSubmissions(rows);
+
+        // Severity per submission drives the queue's overdue filter. A failure
+        // here must not block the queue: the filter then just finds nothing.
+        const { data: severityRows } = await supabase
+          .from("findings")
+          .select("submission_id,severity")
+          .limit(2000);
+        if (active && severityRows) setQueueFindings(severityRows as SlaFindingRow[]);
         setSelectedId(rows.find((row) => row.status === "submitted" || row.status === "under_review")?.id ?? rows[0]?.id ?? null);
       } catch (err) {
         if (active) setError(err instanceof Error ? err.message : "Could not load the review queue.");
@@ -167,22 +191,34 @@ export default function ReviewDashboard() {
   );
 
   /* -------- Analyse the selected submission ----------------------- */
+  // Recording a decision replaces the submission object, so the analysis is
+  // keyed on the submission it ran for: the same submission never re-analyses
+  // (which would wipe the findings the reviewer is looking at), while switching
+  // away and back does.
+  const analysedRef = React.useRef<string | null>(null);
+
   React.useEffect(() => {
-    if (!selected) {
+    if (!selected) return;
+
+    let active = true;
+
+    (async () => {
+      // A recorded decision replaces the submission object, which re-runs this
+      // effect. Re-analysing would throw away the findings the reviewer just
+      // decided on, so a submission that already finished analysing is left
+      // alone — and the spinner is cleared here so a skip is never a hang.
+      if (analysedRef.current === selected.id) {
+        setAnalysing(false);
+        return;
+      }
+
+      // The analysis is reset where it is loaded, so selecting a submission
+      // starts one render rather than several synchronous ones.
+      setAnalysing(true);
       setResult(null);
       setFindings([]);
       setRejected([]);
-      return;
-    }
-
-    let active = true;
-    setAnalysing(true);
-    setResult(null);
-    setFindings([]);
-    setRejected([]);
-    setError(null);
-
-    (async () => {
+      setError(null);
       try {
         const kit = await loadKit(selected);
         if (!active) return;
@@ -275,6 +311,7 @@ export default function ReviewDashboard() {
               aiStatus: "ok",
               analysedAt: new Date().toISOString(),
             });
+            analysedRef.current = selected.id;
             setAnalysing(false);
             return;
           }
@@ -288,6 +325,7 @@ export default function ReviewDashboard() {
         setResult(review);
         setFindings(review.allFindings);
         setRejected(review.rejectedFindings);
+        analysedRef.current = selected.id;
 
         if (supabase && kit && review.allFindings.length > 0) {
           const rows = review.allFindings.map((finding) => ({
@@ -313,7 +351,13 @@ export default function ReviewDashboard() {
           if (insertError && isMissingColumnError(insertError)) {
             const fallback = await supabase
               .from("findings")
-              .insert(rows.map(({ rule_id: _ruleId, ...rest }) => rest))
+              .insert(
+                rows.map((row) => {
+                  const withoutRuleId = { ...row } as Record<string, unknown>;
+                  delete withoutRuleId.rule_id;
+                  return withoutRuleId;
+                })
+              )
               .select("*");
             inserted = fallback.data;
             insertError = fallback.error;
@@ -342,9 +386,41 @@ export default function ReviewDashboard() {
     return () => {
       active = false;
     };
-  }, [selectedId, loadKit]);
+  }, [selected, loadKit]);
 
   /* -------- Decisions -------------------------------------------- */
+  /**
+   * Append to the write-once feed. Best effort: before migration 0004 the
+   * table is absent, the decision still lives in `findings`, and the page says
+   * so once rather than failing the decision itself.
+   */
+  async function logDecision(input: {
+    action: AuditAction;
+    findingId?: string | null;
+    detail: Record<string, unknown>;
+  }) {
+    if (!supabase || !selected) return;
+    const kit = selected.brand_kit_id ? kitsRef.current[selected.brand_kit_id] : null;
+    const organizationId = kit?.organization_id ?? null;
+    // Without an owning organization the row could never be read back.
+    if (!organizationId) return;
+
+    const result = await appendAuditEvent({
+      organizationId,
+      submissionId: selected.id,
+      findingId: input.findingId ?? null,
+      actor: await currentReviewer(),
+      action: input.action,
+      detail: { submissionTitle: selected.title, ...input.detail },
+    });
+
+    if (result.status === "not_migrated") {
+      setAuditNotice(
+        "The decision is recorded, but the write-once audit feed needs migration 20240101000004 applied to this workspace."
+      );
+    }
+  }
+
   async function setFindingStatus(findingId: string, status: "accepted" | "rejected") {
     setFindings((rows) => rows.map((row) => (row.id === findingId ? { ...row, status } : row)));
     if (!supabase) return;
@@ -366,13 +442,31 @@ export default function ReviewDashboard() {
       updateError = retry.error;
     }
 
-    if (updateError) setError("Could not save that decision.");
+    if (updateError) {
+      setError("Could not save that decision.");
+      return;
+    }
+
+    const decidedFinding = findings.find((row) => row.id === findingId);
+    void logDecision({
+      action: status === "accepted" ? "finding.accepted" : "finding.rejected",
+      findingId,
+      detail: {
+        finding: decidedFinding?.message ?? null,
+        clause: decidedFinding?.citation ?? null,
+        decision: status,
+      },
+    });
   }
 
   async function decide(status: "approved" | "changes_requested") {
     if (!selected) return;
     setSavingDecision(true);
     setError(null);
+
+    // Only pending findings follow the submission decision; an explicit accept
+    // or dismiss already recorded by the reviewer must survive it.
+    const decided = status === "approved" ? "accepted" : "rejected";
 
     try {
       if (supabase) {
@@ -384,7 +478,6 @@ export default function ReviewDashboard() {
 
         const pending = findings.filter((f) => f.status === "pending");
         if (pending.length > 0) {
-          const decided = status === "approved" ? "accepted" : "rejected";
           const reviewer = await currentReviewer();
           const { error: bulkError } = await supabase
             .from("findings")
@@ -403,31 +496,30 @@ export default function ReviewDashboard() {
               .eq("status", "pending");
           }
         }
-
-        setSubmissions((rows) =>
-          rows.map((row) => (row.id === selected.id ? { ...row, status } : row))
-        );
-        // Only pending findings follow the submission decision; an explicit
-        // accept or dismiss already recorded by the reviewer must survive it.
-        setFindings((rows) =>
-          rows.map((row) =>
-            row.status === "pending"
-              ? { ...row, status: status === "approved" ? "accepted" : "rejected" }
-              : row
-          )
-        );
       }
+
+      // Demo mode persists nothing, but the decision still has to be visible:
+      // the notice below says the pending findings were resolved, so they are.
+      setSubmissions((rows) =>
+        rows.map((row) => (row.id === selected.id ? { ...row, status } : row))
+      );
+      setFindings((rows) =>
+        rows.map((row) => (row.status === "pending" ? { ...row, status: decided } : row))
+      );
 
       setNotice(
         status === "approved"
           ? `“${selected.title}” approved. The decision is recorded against ${findings.length} finding${findings.length === 1 ? "" : "s"}.`
           : `Changes requested on “${selected.title}”. Pending findings were marked rejected.`
       );
-      if (demo) {
-        setSubmissions((rows) =>
-          rows.map((row) => (row.id === selected.id ? { ...row, status } : row))
-        );
-      }
+
+      void logDecision({
+        action: status === "approved" ? "submission.approved" : "submission.changes_requested",
+        detail: {
+          decision: status,
+          resolvedFindings: findings.filter((row) => row.status === "pending").length,
+        },
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not record the decision.");
     } finally {
@@ -435,8 +527,16 @@ export default function ReviewDashboard() {
     }
   }
 
+  // The same policy clock the admin page uses, so "overdue" means one thing.
+  const slaById = React.useMemo(() => {
+    const rows = getSlaRows(submissions, queueFindings);
+    return new Map(rows.map((row) => [row.submissionId, row]));
+  }, [submissions, queueFindings]);
+
   const visible = submissions.filter((item) => {
     if (filter === "open" && !["submitted", "under_review", "changes_requested"].includes(item.status)) return false;
+    if (filter === "mine" && item.owner_id !== userId) return false;
+    if (filter === "overdue" && slaById.get(item.id)?.state !== "overdue") return false;
     if (filter === "approved" && item.status !== "approved") return false;
     if (query.trim() && !item.title.toLowerCase().includes(query.trim().toLowerCase())) return false;
     return true;
@@ -457,7 +557,12 @@ export default function ReviewDashboard() {
     return [...counts.entries()].map(([name, pages]) => ({ name, pages }));
   }, [segments]);
 
-  const openCount = submissions.filter((item) => ["submitted", "under_review"].includes(item.status)).length;
+  // Matches the "Needs review" filter below: a submission with changes
+  // requested is still open, so counting only two statuses made the header
+  // disagree with the list it points at.
+  const openCount = submissions.filter((item) =>
+    ["submitted", "under_review", "changes_requested"].includes(item.status)
+  ).length;
   const pendingFindings = findings.filter((finding) => finding.status === "pending").length;
   const highSeverity = findings.filter((f) => f.severity === "critical" || f.severity === "high").length;
 
@@ -508,6 +613,17 @@ export default function ReviewDashboard() {
           </Alert>
         </div>
       ) : null}
+      {auditNotice ? (
+        <div className="mt-5">
+          <Alert
+            tone="warning"
+            title="Audit feed not writable"
+            action={<button onClick={() => setAuditNotice(null)} className="btn-ghost btn-sm">Dismiss</button>}
+          >
+            {auditNotice}
+          </Alert>
+        </div>
+      ) : null}
 
       <div className="mt-6 grid gap-6 lg:grid-cols-[330px_minmax(0,1fr)]">
         {/* Queue */}
@@ -526,14 +642,15 @@ export default function ReviewDashboard() {
                   className="field pl-9 py-2 text-[13px]"
                 />
               </div>
-              <div className="mt-2 grid grid-cols-3 gap-1 rounded-lg bg-ink-50 p-1">
-                {FILTERS.map((item) => (
+              <div className="mt-2 flex flex-wrap gap-1 rounded-lg bg-ink-50 p-1">
+                {/* "Mine" needs a signed-in reviewer; the demo has no owners. */}
+                {FILTERS.filter((item) => item.value !== "mine" || userId).map((item) => (
                   <button
                     key={item.value}
                     type="button"
                     onClick={() => setFilter(item.value)}
                     className={cn(
-                      "rounded-md px-2 py-1.5 text-[12px] font-medium transition",
+                      "flex-1 whitespace-nowrap rounded-md px-2 py-1.5 text-[12px] font-medium transition",
                       filter === item.value ? "bg-white text-ink-900 shadow-sm" : "text-ink-400 hover:text-ink-700"
                     )}
                   >
@@ -547,7 +664,13 @@ export default function ReviewDashboard() {
               {visible.length === 0 ? (
                 <EmptyState
                   title="Nothing in this view"
-                  description="Try another filter or submit new content for review."
+                  description={
+                    filter === "mine"
+                      ? "No submission is assigned to you. An admin can set the owner from the workspace tab."
+                      : filter === "overdue"
+                        ? "Every open review is inside its target time."
+                        : "Try another filter or submit new content for review."
+                  }
                   action={<Link href="/submit" className="btn-secondary btn-sm">Submit content</Link>}
                 />
               ) : (

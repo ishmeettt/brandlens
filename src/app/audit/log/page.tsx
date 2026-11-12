@@ -4,6 +4,11 @@ import Link from "next/link";
 import * as React from "react";
 import { AppShell } from "../../../components/AppShell";
 import { Alert, Badge, Card, CardHeader, EmptyState, PageHeader } from "../../../components/ui";
+import {
+  buildAuditLogFromEvents,
+  loadAuditEvents,
+  verifyStoredChain,
+} from "../../../lib/audit-events";
 import { buildDemoFindings, demoSubmissions } from "../../../lib/demo";
 import {
   buildDecisionLog,
@@ -29,12 +34,28 @@ export default function DecisionLogPage() {
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
   const [shown, setShown] = React.useState(PAGE_SIZE);
+  // Which record this feed is showing: the write-once table, or the derived
+  // ledger that stands in before migration 0004 is applied.
+  const [source, setSource] = React.useState<"stored" | "derived">("derived");
 
   React.useEffect(() => {
     let active = true;
 
     (async () => {
       try {
+        // The write-once feed wins when it has rows: that table is the record.
+        const stored = demo ? null : await loadAuditEvents(500);
+        if (stored?.events?.length) {
+          const log = buildAuditLogFromEvents(stored.events);
+          const check = await verifyStoredChain(stored.events);
+          if (active) {
+            setEntries(log);
+            setVerification(check);
+            setSource("stored");
+          }
+          return;
+        }
+
         let submissions: ContentSubmission[] = demo ? demoSubmissions : [];
         let findings: Finding[] = demo ? buildDemoFindings() : [];
 
@@ -62,6 +83,7 @@ export default function DecisionLogPage() {
         if (active) {
           setEntries(log);
           setVerification(check);
+          setSource("derived");
         }
       } catch (err) {
         if (active) setError(err instanceof Error ? err.message : "Could not build the decision log.");
@@ -103,7 +125,8 @@ export default function DecisionLogPage() {
               </p>
               <p className="mt-0.5 text-[12px] text-ink-500">
                 {verification.checked} entr{verification.checked === 1 ? "y" : "ies"} recomputed, each
-                hash including the one before it.
+                hash including the one before it
+                {source === "stored" ? " · read from the write-once feed" : " · derived from findings"}.
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
@@ -116,9 +139,9 @@ export default function DecisionLogPage() {
             </div>
           </div>
           <p className="mt-3 border-t border-ink-50 pt-3 text-[11px] leading-relaxed text-ink-400">
-            The chain is derived from stored findings ordered by decision time; append-only storage is
-            what migration 0004 adds. Rewriting a message, swapping two decisions or deleting an entry
-            changes every later hash.
+            {source === "stored"
+              ? "Every entry is a row in audit_events, which the database refuses to update or delete. Each hash covers the row before it, so removing or swapping a row breaks the chain."
+              : "The chain is derived from stored findings ordered by decision time; append-only storage is what migration 0004 adds. Rewriting a message, swapping two decisions or deleting an entry changes every later hash."}
           </p>
         </Card>
       ) : null}

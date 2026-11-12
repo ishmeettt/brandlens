@@ -84,22 +84,22 @@ const PAGE_TITLES: Record<string, string> = {
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
-  const [mobileOpen, setMobileOpen] = React.useState(false);
-  const [loading, setLoading] = React.useState(isSupabaseConfigured);
-  const [email, setEmail] = React.useState<string | null>(null);
-  const [role, setRole] = React.useState<UserRole>("admin");
-  const [organization, setOrganization] = React.useState<string | null>(null);
-
   const isDemo = !isSupabaseConfigured;
+  // The drawer belongs to the page it was opened on, so navigating closes it:
+  // a different pathname means the stored one no longer matches.
+  const [mobileOpenAt, setMobileOpenAt] = React.useState<string | null>(null);
+  const mobileOpen = mobileOpenAt === pathname;
+  const [loading, setLoading] = React.useState(!isDemo);
+  const [email, setEmail] = React.useState<string | null>(
+    isDemo ? "ava@lumen.example" : null
+  );
+  const [role, setRole] = React.useState<UserRole>(isDemo ? "admin" : "creator");
+  const [organization, setOrganization] = React.useState<string | null>(
+    isDemo ? demoOrgName : null
+  );
 
   React.useEffect(() => {
-    if (!supabase) {
-      setEmail("ava@lumen.example");
-      setOrganization(demoOrgName);
-      setRole("admin");
-      setLoading(false);
-      return;
-    }
+    if (!supabase) return;
 
     let active = true;
     (async () => {
@@ -125,8 +125,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       active = false;
     };
   }, [router]);
-
-  React.useEffect(() => setMobileOpen(false), [pathname]);
 
   const visibleNav = NAV.filter((item) => !item.roles || item.roles.includes(role));
   const title = PAGE_TITLES[pathname] ?? "BrandLens";
@@ -198,7 +196,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <div className="fixed inset-0 z-40 lg:hidden">
           <div
             className="absolute inset-0 bg-ink-900/30 backdrop-blur-sm"
-            onClick={() => setMobileOpen(false)}
+            onClick={() => setMobileOpenAt(null)}
           />
           <aside className="absolute inset-y-0 left-0 w-[280px] bg-white shadow-lift animate-fade-in">
             {sidebar}
@@ -211,7 +209,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <div className="flex h-16 items-center gap-3 px-4 sm:px-6 lg:px-8">
             <button
               type="button"
-              onClick={() => setMobileOpen(true)}
+              onClick={() => setMobileOpenAt(pathname)}
               className="btn-ghost -ml-2 px-2 lg:hidden"
               aria-label="Open navigation"
             >

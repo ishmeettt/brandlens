@@ -17,7 +17,10 @@ BrandLens-Judges-2026
 ```
 
 `npm run seed:demo` recreates the demo users and their Lumen Analytics
-workspace (4 submissions, 11 findings, 1 brand kit).
+workspace (4 submissions, 11 findings, 1 brand kit). Its findings come from the
+rule engine itself, so every seeded audit record reproduces its own findings.
+Run `npm run seed:demo -- --dry-run` to print the plan — findings, decisions and
+the reconciliation check — without writing anything.
 
 The app runs without credentials in read-only demo mode. To use the real
 workspace, connect Supabase:
@@ -98,6 +101,7 @@ npm run verify:supabase   # 16 checks against the real RLS policies
 npm run eval:rules        # replay the rule engine against the labelled corpus
 npm run test:governance   # 43 governance checks
 npm run seed:demo         # (re)build the judge demo workspace
+npm run seed:demo -- --dry-run   # print what seeding would write
 ```
 
 Built with Next.js 16 (App Router), React 19, Tailwind CSS and Supabase
