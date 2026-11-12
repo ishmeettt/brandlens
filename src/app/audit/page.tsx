@@ -26,6 +26,7 @@ import {
   sealAuditPack,
   type AuditPack,
 } from "../../lib/audit-pack";
+import { auditPackPdfFilename, auditPackToPdf } from "../../lib/audit-pack-pdf";
 import { buildDemoFindings, demoBrandKit, demoSubmissions } from "../../lib/demo";
 import { formatDateTime } from "../../lib/format";
 import {
@@ -130,6 +131,21 @@ function AuditRecord() {
     };
   }, [id, demo]);
 
+  function downloadPdf() {
+    if (!pack) return;
+    const bytes = auditPackToPdf(pack);
+    const blob = new Blob([bytes.slice().buffer], { type: "application/pdf" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = auditPackPdfFilename(pack);
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+    setNotice(`Downloaded ${auditPackPdfFilename(pack)}.`);
+  }
+
   function downloadJson() {
     if (!pack) return;
     const blob = new Blob([auditPackToJson(pack)], { type: "application/json" });
@@ -200,10 +216,13 @@ function AuditRecord() {
               <Link href="/review" className="btn-secondary btn-sm">
                 Back to review
               </Link>
+              <Button size="sm" onClick={downloadPdf}>
+                Download PDF
+              </Button>
               <Button variant="secondary" size="sm" onClick={downloadJson}>
                 Download JSON
               </Button>
-              <Button size="sm" onClick={() => window.print()}>
+              <Button variant="secondary" size="sm" onClick={() => window.print()}>
                 Print
               </Button>
             </>

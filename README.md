@@ -6,7 +6,7 @@ reviewer accepts or dismisses each one before the submission is approved.
 
 ## Live demo
 
-<https://site-4dde5f48239247f79cb0cf1b59ab161c.freebuff.page>
+<https://site-a3e60bfeac664aac8b66164e0943ddf4.freebuff.page>
 
 Open the link and choose **Enter demo workspace** on the sign-in page. The
 seeded judge account is public by design and holds only sample data:
@@ -29,7 +29,7 @@ workspace, connect Supabase:
 2. Copy the Project URL and the **publishable** key (or the legacy **anon** key)
    from **Settings → API Keys**.
 3. Apply the schema: open the **SQL Editor** and run each file in
-   `supabase/migrations/` in filename order (0001, 0002, 0003).
+   `supabase/migrations/` in filename order (0001 through 0006).
 4. Create `.env.local` in the project root:
 
    ```bash
@@ -68,8 +68,8 @@ combined verdict.
   `brand_kits.guidelines.exemptions`, edited on the brand-kit page. The engine
   suppresses matching findings, the review names what it excused, and the audit
   record keeps the decision after it lapses.
-- **Audit record** — `/audit?submission=…` is a printable record (Print → PDF)
-  plus JSON with a SHA-256 digest, engine reconciliation, anchors and exemptions.
+- **Audit record** — `/audit?submission=…` exports the same pack as a PDF and as
+  JSON with a SHA-256 digest, engine reconciliation, anchors and exemptions.
 - **Decision log** — `/audit/log` chains every decision with the hash of the one
   before it and verifies the chain in the browser.
 - **Per-rule precision** — the Admin dashboard maps decisions back to exact

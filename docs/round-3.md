@@ -102,7 +102,7 @@ exports.
 | 2.2 | SLA view | Admin shows what is late, with a count that matches the queue | Built — policy clock on Admin, target derived from worst severity, `due_at` wins when present |
 | 2.3 | Exemptions with scope and expiry | A reviewer grants "this wording is allowed until 31 March on this campaign"; the engine honours it, and it stops applying on its own | Built |
 | 2.4 | Decision history per submission | Every decision is one readable feed with a person and a timestamp | Built as a hash-chained feed; stored append-only events need migration 0004 |
-| 2.5 | Audit pack export | One action produces a PDF and a JSON of findings, citations, decisions and exemptions | Built — printable record + JSON with SHA-256 digest |
+| 2.5 | Audit pack export | One action produces a PDF and a JSON of findings, citations, decisions and exemptions | Built — PDF and JSON rendered from the same sealed pack |
 
 ### Exemptions
 
