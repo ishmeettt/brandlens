@@ -115,7 +115,9 @@ async function ensureUser({ email, password, name, role }, org) {
       method: "POST",
       body: JSON.stringify({
         email,
-        password,
+        // Every demo account shares the published password, so a reviewer can
+        // actually be signed in — an account with no password cannot.
+        password: password ?? DEMO_ACCOUNT.password,
         email_confirm: true,
         user_metadata: { full_name: name },
       }),
@@ -265,7 +267,7 @@ async function loadEngine() {
       contents: [
         'export { runRuleSet } from "./src/lib/rules.ts";',
         'export { stripAnchors } from "./src/lib/document-extract.ts";',
-        'export { buildAuditPack } from "./src/lib/audit-pack.ts";',
+        'export { buildAuditPack, canonicalJson, sha256Hex } from "./src/lib/audit-pack.ts";',
       ].join("\n"),
       resolveDir: root,
       loader: "ts",
@@ -323,11 +325,12 @@ function findingsFor(engine, submission, submissionId) {
  */
 async function insertFindings(rows) {
   try {
-    await call("/rest/v1/findings", {
+    const inserted = await call("/rest/v1/findings", {
       method: "POST",
-      headers: { Prefer: "return=minimal" },
+      headers: { Prefer: "return=representation" },
       body: JSON.stringify(rows),
     });
+    return { kind: "with rule_id", rows: Array.isArray(inserted) ? inserted : [] };
   } catch (error) {
     const missingColumn =
       error.status === 400 && /42703|PGRST204|column .* does not exist/i.test(error.body ?? "");
@@ -342,9 +345,87 @@ async function insertFindings(rows) {
       headers: { Prefer: "return=minimal" },
       body: JSON.stringify(withoutRule),
     });
-    return "without rule_id (migration 0004 not applied)";
+    return { kind: "without rule_id (migration 0004 not applied)", rows: [] };
   }
-  return "with rule_id";
+}
+
+/** Audit events already recorded for this organization, or null without 0004. */
+async function existingAuditEvents(organizationId) {
+  try {
+    const rows = await call(
+      `/rest/v1/audit_events?organization_id=eq.${organizationId}&select=id&limit=1`
+    );
+    return Array.isArray(rows) ? rows.length : 0;
+  } catch (error) {
+    if (
+      error.status === 404 ||
+      /relation .* does not exist|could not find the table/i.test(error.body ?? "")
+    ) {
+      return null;
+    }
+    throw error;
+  }
+}
+
+/**
+ * The decision log reads the write-once feed, so a workspace that has never
+ * written to it would show an empty log. Seed the decisions this demo data
+ * already contains, chained exactly as the app chains them — and only while the
+ * feed is empty, because an append-only table cannot be reset afterwards.
+ */
+async function seedAuditFeed(engine, organizationId, created) {
+  const existing = await existingAuditEvents(organizationId);
+  if (existing === null) return null; // migration 0004 not applied
+  if (existing > 0) return 0;
+
+  // Collect first, then chain in timestamp order. The log verifies the chain
+  // over rows sorted by time, so linking them in any other order would leave a
+  // feed that reports itself broken.
+  const bodies = [];
+  for (const { submission, submissionId, findings, stored } of created) {
+    const idByMessage = new Map(stored.map((row) => [row.message, row.id]));
+    const decided = findings.filter((finding) => finding.status !== "pending");
+    for (const [index, finding] of decided.entries()) {
+      bodies.push({
+        organization_id: organizationId,
+        submission_id: submissionId,
+        finding_id: idByMessage.get(finding.message) ?? null,
+        actor: DEMO_ACCOUNT.email,
+        action: finding.status === "accepted" ? "finding.accepted" : "finding.rejected",
+        detail: {
+          submissionTitle: submission.title,
+          finding: finding.message,
+          clause: finding.citation ?? null,
+          decision: finding.status,
+        },
+        // Unique per event, and in the order they were decided.
+        created_at: new Date(
+          Date.parse(submission.created_at) + index * 60_000
+        ).toISOString(),
+      });
+    }
+  }
+
+  if (bodies.length === 0) return 0;
+  bodies.sort(
+    (a, b) =>
+      Date.parse(a.created_at) - Date.parse(b.created_at) ||
+      String(a.submission_id).localeCompare(String(b.submission_id))
+  );
+
+  const events = [];
+  let prevHash = "0".repeat(64);
+  for (const body of bodies) {
+    const hash = await engine.sha256Hex(engine.canonicalJson({ ...body, prev_hash: prevHash }));
+    events.push({ ...body, prev_hash: prevHash, hash });
+    prevHash = hash;
+  }
+  await call("/rest/v1/audit_events", {
+    method: "POST",
+    headers: { Prefer: "return=minimal" },
+    body: JSON.stringify(events),
+  });
+  return events.length;
 }
 
 async function seed() {
@@ -426,6 +507,7 @@ async function seed() {
   });
 
   let findingCount = 0;
+  const created = [];
   for (const { submission } of planned) {
     const [row] = await call("/rest/v1/content_submissions?select=id", {
       method: "POST",
@@ -442,11 +524,37 @@ async function seed() {
       }),
     });
 
+    // Give the one review in progress an owner and a deadline, so the queue's
+    // Mine/Overdue filters have something real to show. Ownership arrives with
+    // migration 0004, so this stays best effort.
+    if (submission.status === "under_review") {
+      try {
+        await call(`/rest/v1/content_submissions?id=eq.${row.id}`, {
+          method: "PATCH",
+          headers: { Prefer: "return=minimal" },
+          body: JSON.stringify({ owner_id: judgeId, due_at: ago(-2) }),
+        });
+      } catch {
+        // No owner_id column yet: the workspace works without it.
+      }
+    }
+
     const findings = findingsFor(engine, submission, row.id);
-    const writeKind = findings.length > 0 ? await insertFindings(findings) : "none";
+    const write =
+      findings.length > 0 ? await insertFindings(findings) : { kind: "none", rows: [] };
     findingCount += findings.length;
+    created.push({ submission, submissionId: row.id, findings, stored: write.rows });
     console.log(
-      `  ${submission.status.padEnd(12)} ${submission.title} — ${findings.length} findings (${writeKind})`
+      `  ${submission.status.padEnd(12)} ${submission.title} — ${findings.length} findings (${write.kind})`
+    );
+  }
+
+  const seededEvents = await seedAuditFeed(engine, judgeId, created);
+  if (seededEvents !== null) {
+    console.log(
+      seededEvents > 0
+        ? `  audit feed seeded with ${seededEvents} decision event${seededEvents === 1 ? "" : "s"}`
+        : "  audit feed already has entries; left untouched"
     );
   }
 

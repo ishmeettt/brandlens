@@ -81,18 +81,19 @@ Verified
     Removed it again: back to 3 findings, kit restored.
   - Seeded demo kit carries one active and one lapsed exemption.
 
-Not done / blocked
-  - Migration 0004 is NOT applied to the hosted database. The agent's service key
-    cannot run DDL. Until the SQL is pasted into the Supabase SQL editor:
-      * owners and due dates cannot be saved,
-      * reviewers shown in the decision feed read "Unattributed",
-      * findings carry no stored `rule_id` (precision is recovered by re-running
-        the engine instead),
-      * the `audit_events` table exists only after the migration.
-  - Decisions are written to `audit_events` and the decision log reads it when
-    it has rows. The table only exists after the migration, so until then the
-    page falls back to the derived chain and a decision shows a one-time notice.
-    The stored path has not been run against a migrated database.
+Done / verified on the hosted project
+  - Migrations 0004, 0005 and 0006 are applied to uxjnauxumkevhszoylfb (see
+    supabase/migrations). Verified afterwards:
+      * all 11 demo findings store their `rule_id`,
+      * a decision records `reviewed_by` / `reviewed_at` (tested as a reviewer),
+      * owners and due dates save from Admin,
+      * decisions land in `audit_events`, and the decision log renders from the
+        table with the stored hash chain verified (as admin and as reviewer).
+  - 0005 exists because `audit_events.submission_id` is `on delete set null` and
+    the append-only trigger rejected that nulling, so a reviewed submission
+    could not be deleted and `seed:demo` could not reset the workspace.
+  - 0006 exists because reviewers could append but not read the feed: their
+    insert saw an empty table and started a second chain at the genesis hash.
 
 
 3. TRUST AND MEASUREMENT — COMPLETE EXCEPT SSO
@@ -163,8 +164,9 @@ Required
      exposed and is no longer needed.
 
 Optional / future work
-  3. Apply migration 0004, then confirm decisions land in `audit_events` and the
-     feed renders from the table instead of the derived chain.
+  3. Chain appends read the newest hash before inserting, so two simultaneous
+     decisions can still fork the chain; a server-side chain (advisory lock in a
+     trigger) would close that window.
   4. Try a real .docx end to end and keep one in the corpus.
   5. SSO/SAML once a Supabase plan and IdP are available.
   6. Remove the two 60 KB test PDFs left in the `content-submissions` storage

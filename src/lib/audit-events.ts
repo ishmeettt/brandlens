@@ -44,6 +44,18 @@ export interface AuditWriteResult {
   hash?: string;
 }
 
+/**
+ * The one timestamp spelling used in hashes.
+ *
+ * PostgreSQL returns `timestamptz` as `…+00:00`, while the row was hashed from
+ * a JavaScript `…Z` string. Both name the same instant, so hash and verify the
+ * normalised form or every chain reads as broken.
+ */
+function normaliseTimestamp(value: string): string {
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? value : new Date(parsed).toISOString();
+}
+
 export interface StoredAuditEvent {
   id: string;
   organization_id: string;
@@ -91,7 +103,7 @@ export async function appendAuditEvent(input: AuditEventInput): Promise<AuditWri
 
   // The hash covers the stored columns, so anyone with table access can
   // recompute it; `created_at` is written explicitly because it is hashed.
-  const createdAt = new Date().toISOString();
+  const createdAt = normaliseTimestamp(new Date().toISOString());
   const body = {
     organization_id: input.organizationId,
     submission_id: input.submissionId,
@@ -172,7 +184,7 @@ export async function verifyStoredChain(
         action: event.action,
         detail: event.detail,
         prev_hash: event.prev_hash,
-        created_at: event.created_at,
+        created_at: normaliseTimestamp(event.created_at),
       })
     );
     if (event.prev_hash !== prevHash || event.hash !== expected) {
